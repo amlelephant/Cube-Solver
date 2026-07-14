@@ -34,7 +34,7 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8")
 
 from cube_detector import detect_and_extract, draw_sticker_overlay
-from ensemble      import classify_face
+from ensemble      import classify_face, calibrate, reset_calibration, calibration_status
 from color_classifier import (
     CLASSES, COLOR_BGR, COLOR_TO_FACE,
 )
@@ -235,6 +235,12 @@ def draw_debug_overlay(canvas, state):
     method = result.get("method", "")
     draw_text(canvas, f"detect={method}", 8, CAM_H - 16, C_YELLOW, 0.45)
 
+    cal = calibration_status()
+    cal_txt = (f"orange/red boundary: calibrated (R={cal['red']} L={cal['orange']})"
+               if cal["active"] else
+               "orange/red boundary: not yet calibrated (scan R and L faces)")
+    draw_text(canvas, cal_txt, 8, CAM_H - 2, C_YELLOW, 0.4)
+
 
 # ---------------------------------------------------------------------------
 # Core scan action
@@ -254,6 +260,15 @@ def scan_current_face(frame, state):
         return False
 
     colors, confs, details = classify_face(result["patches"])
+
+    # The center sticker's true color is known in advance (fixed WCA
+    # scheme — see FACE_INFO), independent of what the classifier guessed.
+    # Use it to calibrate the orange/red boundary to this session's actual
+    # camera + lighting (see ensemble.calibrate).
+    center_color  = FACE_INFO[state.current_face]["center_color"]
+    center_detail = details[4]
+    if "h" in center_detail:
+        calibrate(center_color, center_detail["h"], center_detail["s"], center_detail["v"])
 
     unknown_count = colors.count("unknown")
     low_conf      = sum(1 for c in confs if c < 0.45)
@@ -356,6 +371,8 @@ def print_results(scanned):
 # Main loop
 # ---------------------------------------------------------------------------
 def main():
+    reset_calibration()  # fresh camera/lighting calibration for this session
+
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("ERROR: Could not open webcam.")

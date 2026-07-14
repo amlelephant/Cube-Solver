@@ -12,11 +12,15 @@ We combine them with a weighted sum, then apply two post-processing rules:
   1. Agreement bonus: if CNN and HSV independently agree on the top class,
      boost that class's combined score by 20% before final argmax.
 
-  2. Orange-red disambiguation: these two are the hardest pair. When the
-     combined scores for orange and red are within 0.15 of each other,
-     we apply an extra HSV rule: if saturation is high AND hue < 15,
-     prefer red; if hue > 10, prefer orange. This hard rule breaks ties
-     that the soft scores cannot resolve.
+  2. Orange-red disambiguation: these two are the hardest pair — orange
+     reads redder than its nominal hue under most non-daylight lighting,
+     so a fixed universal hue threshold can't separate them reliably across
+     different rooms/cameras. When the combined scores for orange and red
+     are within 0.15 of each other, we break the tie using hue relative to
+     a boundary that is *calibrated per session* from the two center
+     stickers we already scan (R's center is always red, L's is always
+     orange — see calibrate()). Falls back to a fixed default before both
+     centers have been seen.
 
 Weights are configurable. Defaults:
   CNN weight:  0.65  (generalises better across lighting conditions)
@@ -40,6 +44,61 @@ HSV_WEIGHT = 0.35
 
 # If the top-2 combined scores are within this margin, apply tiebreak rules
 TIEBREAK_MARGIN = 0.15
+
+# ---------------------------------------------------------------------------
+# Per-session color calibration
+# ---------------------------------------------------------------------------
+# The caller (state_finder.py) knows each face's true center color in
+# advance from the fixed WCA scheme, before it ever runs classification on
+# it. We use that free ground truth to adapt the orange/red boundary to
+# this session's actual camera + lighting, rather than trusting one fixed
+# hue threshold that can't account for lighting-dependent hue drift — the
+# main reason orange gets misread as red.
+_calibrated_hue = {}   # color_name -> measured hue from a known-color sample
+_DEFAULT_ORANGE_RED_BOUNDARY = 12  # matches the original fixed threshold
+
+
+def calibrate(color_name, h, s, v):
+    """
+    Record a known-good HSV sample for a color (e.g. a face's center
+    sticker, whose color is known in advance, not predicted).
+    """
+    _calibrated_hue[color_name] = h
+
+
+def reset_calibration():
+    """Clear calibration state — call at the start of a new scan session."""
+    _calibrated_hue.clear()
+
+
+def calibration_status():
+    """
+    {"red": hue or None, "orange": hue or None, "active": bool} — for
+    debug/UI display, so it's visible whether the session is using
+    calibrated or fallback thresholds.
+    """
+    red_h    = _calibrated_hue.get("red")
+    orange_h = _calibrated_hue.get("orange")
+    return {
+        "red":    red_h,
+        "orange": orange_h,
+        "active": red_h is not None and orange_h is not None,
+    }
+
+
+def _orange_red_boundary():
+    """
+    Hue that separates red from orange for this session.
+
+    Uses the midpoint between this session's actual calibrated red and
+    orange hues once both are known; falls back to the original fixed
+    threshold otherwise.
+    """
+    red_h    = _calibrated_hue.get("red")
+    orange_h = _calibrated_hue.get("orange")
+    if red_h is not None and orange_h is not None and orange_h > red_h:
+        return (red_h + orange_h) / 2
+    return _DEFAULT_ORANGE_RED_BOUNDARY
 
 
 def ensemble_classify(bgr_region):
@@ -117,12 +176,15 @@ def ensemble_classify(bgr_region):
     red_score    = combined.get("red",    0)
 
     if abs(orange_score - red_score) < TIEBREAK_MARGIN:
-        # Use HSV hue to break the tie
+        # Use hue relative to this session's calibrated orange/red boundary
+        # to break the tie (falls back to a fixed default before both
+        # center stickers have been calibrated — see calibrate() above).
         if s > 80:    # only meaningful if saturation is high enough
-            if h <= 11:
+            boundary = _orange_red_boundary()
+            if h <= boundary - 1:
                 combined["red"]    += 0.12
                 combined["orange"] -= 0.06
-            elif h >= 13:
+            elif h >= boundary + 1:
                 combined["orange"] += 0.12
                 combined["red"]    -= 0.06
 
