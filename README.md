@@ -65,10 +65,12 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-`kociemba` is required but not bundled by default on all platforms — see the
-comment in `requirements.txt` if the install fails; `kociemba2` is a
-pure-Python fallback that `state_finder.py` and `test_install.py` both
-already detect automatically.
+Cube-state solve validation uses a vendored pure-Python solver
+(`cv/twophase/`, MIT licensed — see `cv/twophase/LICENSE.txt`) instead of
+the `kociemba` PyPI package, which ships no Windows wheel and needs a C
+compiler to build from source. Nothing extra to install for it. Its first
+call precomputes pruning tables (~30-60s, cached afterward to
+`cv/tables.json`, gitignored).
 
 ## Running it
 

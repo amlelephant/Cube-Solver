@@ -21,10 +21,14 @@ Don't let BLE work crowd out CV work without being asked.
 
 - Python 3.13, venv at `.venv/` (`.venv\Scripts\activate` on Windows).
 - `pip install -r requirements.txt` — pinned to what's proven working in
-  `.venv`. **`kociemba` is required by `cv/state_finder.py` and
-  `cv/test_install.py` but is not currently installed** — install it (or its
-  pure-Python fallback `kociemba2`, which both scripts auto-detect) before
-  running either.
+  `.venv`. Cube-state solve validation (`cv/state_finder.py`,
+  `cv/test_install.py`) uses the vendored pure-Python solver at
+  `cv/twophase/` (MIT licensed — see its `LICENSE.txt`), **not** the
+  `kociemba` PyPI package, which ships no Windows wheel and needs a C
+  compiler to build from source; a prior version of this code assumed a
+  `kociemba2` PyPI fallback existed — it doesn't, `pip install kociemba2`
+  404s. `twophase`'s first `solve()` call precomputes pruning tables
+  (~30-60s), cached afterward to `cv/tables.json` (gitignored).
 - No test runner is configured. The one real test,
   `ble/tests/test_ble_threading.py`, is run with `python -m pytest tests/`
   from inside `ble/` (it inserts `ble/` onto `sys.path` itself).
@@ -54,9 +58,14 @@ Don't let BLE work crowd out CV work without being asked.
     robust than the HSV-only baseline in `legacy/hsv_only_classifier/`.
   - `state_finder.py` — **the MVP demo entry point.** Live webcam UI: scan
     all 6 faces (SPACE to capture), assemble the 54-sticker state, validate
-    with `kociemba`. This is the shape the actual verification feature
-    should grow from (scan scramble → scan solved end state → confirm valid
-    solve).
+    with the vendored `twophase` solver. This is the shape the actual
+    verification feature should grow from (scan scramble → scan solved end
+    state → confirm valid solve).
+  - `twophase/` — vendored pure-Python two-phase solver (from
+    [tcbegley/cube-solver](https://github.com/tcbegley/cube-solver), MIT
+    licensed, see its `LICENSE.txt`). Zero third-party dependencies. `solve()`
+    call signature and 54-char URFDLB facelet-string format match the
+    `kociemba` package it replaces.
   - `test_install.py` — dependency + pipeline smoke test with no webcam or
     model weights required. Run this first when setting up.
   - `motion_detector.py`, `train.py`, `diagnose.py`, `test_square.py` —

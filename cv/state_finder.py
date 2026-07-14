@@ -28,21 +28,22 @@ import cv2
 import numpy as np
 import sys
 
+# Some terminals (default Windows console codepages) can't encode the
+# unicode arrows/checkmarks used in this script's output — force UTF-8
+# so printing them doesn't crash the process.
+sys.stdout.reconfigure(encoding="utf-8")
+
 from cube_detector import detect_and_extract, draw_sticker_overlay
 from ensemble      import classify_face
 from color_classifier import (
     CLASSES, COLOR_BGR, COLOR_TO_FACE,
 )
 
-try:
-    import kociemba
-    KOCIEMBA_AVAILABLE = True
-except ImportError:
-    try:
-        import kociemba2 as kociemba
-        KOCIEMBA_AVAILABLE = True
-    except ImportError:
-        KOCIEMBA_AVAILABLE = False
+# Vendored pure-Python two-phase solver (cv/twophase/, MIT licensed —
+# see cv/twophase/LICENSE.txt). Used in place of the 'kociemba' PyPI
+# package, which ships no Windows wheel and requires a C compiler to
+# build from source.
+import twophase as kociemba
 
 # ---------------------------------------------------------------------------
 # Face scanning order (WCA standard)
@@ -304,9 +305,6 @@ def validate_and_solve(state_str):
     """
     Run the kociemba solver. Returns (solution, error).
     """
-    if not KOCIEMBA_AVAILABLE:
-        return None, "kociemba not installed (pip install kociemba2)"
-
     try:
         solution = kociemba.solve(state_str)
         return solution, None

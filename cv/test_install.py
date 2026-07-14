@@ -13,6 +13,11 @@ import os
 import types
 import numpy as np
 
+# Some terminals (default Windows console codepages) can't encode the
+# unicode arrows/checkmarks used in this script's output — force UTF-8
+# so printing them doesn't crash the process.
+sys.stdout.reconfigure(encoding="utf-8")
+
 PASS = "[PASS]"
 FAIL = "[FAIL]"
 WARN = "[WARN]"
@@ -53,13 +58,12 @@ check("torch",       _torch)
 check("torchvision", lambda: f"v{__import__('torchvision').__version__}")
 
 def _kociemba():
-    try:
-        import kociemba as k
-    except ImportError:
-        import kociemba2 as k
-    sol = k.solve("UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDLLLLLLLLLBBBBBBBBB")
+    # Vendored pure-Python solver (cv/twophase/) — see its LICENSE.txt.
+    # Replaces the 'kociemba' PyPI package, which has no Windows wheel.
+    import twophase as k
+    sol = k.solve("UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB")
     return f"solve('')='{sol}' (empty = already solved ✓)"
-check("kociemba / kociemba2", _kociemba)
+check("twophase (vendored solver)", _kociemba)
 
 def _ultralytics():
     from ultralytics import YOLO

@@ -16,6 +16,10 @@ cv/face_dataset/
 cv/cube_dataset/
 ble/training_data/
 
+# Precomputed pruning tables for cv/twophase/ (the vendored solver) — generated
+# on first solve() call (~1 min), cached to speed up subsequent runs.
+tables.json
+
 # OS
 Thumbs.db
 .DS_Store

@@ -5,11 +5,10 @@ torch==2.13.0
 torchvision==0.28.0
 ultralytics==8.4.93
 
-# Cube-state validation (cv/state_finder.py, cv/test_install.py).
-# NOT currently installed in .venv — install before running state_finder.py:
-#   pip install kociemba       (preferred; needs a C build toolchain on some platforms)
-#   pip install kociemba2      (pure-Python fallback; both scripts auto-detect it)
-kociemba
+# Cube-state validation (cv/state_finder.py, cv/test_install.py) uses the
+# vendored pure-Python solver at cv/twophase/ (MIT licensed, no separate
+# install needed) — 'kociemba' from PyPI is not used: it ships no Windows
+# wheel and requires a C compiler to build from source.
 
 # Smart-cube BLE integration (ble/) — optional, secondary to the CV MVP.
 bleak==3.0.2
