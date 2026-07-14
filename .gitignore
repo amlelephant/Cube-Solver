@@ -1,0 +1,21 @@
+# Python environment
+.venv/
+__pycache__/
+*.pyc
+
+# Model weights and other ML artifacts — large binaries, not source.
+# Regenerate via the training scripts (cv/train.py, cv/cnn_classifier.py --train,
+# ble/train_move_classifier.py) rather than committing them.
+*.pt
+*.task
+runs/
+training_runs/
+
+# Training data and datasets — large, re-collected rather than versioned in git.
+cv/face_dataset/
+cv/cube_dataset/
+ble/training_data/
+
+# OS
+Thumbs.db
+.DS_Store

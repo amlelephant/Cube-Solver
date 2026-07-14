@@ -1,0 +1,19 @@
+# Core CV pipeline (cv/) — pinned to what's installed and verified working in .venv.
+opencv-python==5.0.0.93
+numpy==2.5.1
+torch==2.13.0
+torchvision==0.28.0
+ultralytics==8.4.93
+
+# Cube-state validation (cv/state_finder.py, cv/test_install.py).
+# NOT currently installed in .venv — install before running state_finder.py:
+#   pip install kociemba       (preferred; needs a C build toolchain on some platforms)
+#   pip install kociemba2      (pure-Python fallback; both scripts auto-detect it)
+kociemba
+
+# Smart-cube BLE integration (ble/) — optional, secondary to the CV MVP.
+bleak==3.0.2
+pywin32==312; sys_platform == "win32"
+
+# Legacy-only, not required for the MVP path:
+#   mediapipe — used solely by legacy/hand_tracking_experiment/
