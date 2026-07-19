@@ -3,8 +3,14 @@ train_move_classifier.py
 
 Trains a ResNet-18 to classify which cube face moved and in which direction.
 
-Input:   temporal difference image  =  mid_01 frame − before frame
-         (captures exactly what moved and in which direction; background cancels out)
+Input:   ORDERED stack of temporal difference images across the move window
+         (before→mid_00→mid_01→mid_02→after = 4 signed diffs = 12 channels).
+         A single diff is order-free — CW and CCW of the same face are
+         time-reversals of each other, so one diff can barely separate
+         them. Stacking the diffs in temporal order as input channels
+         (early fusion) preserves motion order, which is exactly where
+         direction lives. `--diffs 1` reproduces the old single-diff
+         input (mid_01 − before) for ablation.
 Output:  12 classes — the raw BLE byte (0–11) already in your moves_labeled.jsonl
 
 Classes:
@@ -56,6 +62,10 @@ except ImportError:
 NUM_CLASSES = 12
 IMG_SIZE    = 224    # ResNet-18 standard input size
 MODEL_PATH  = "move_classifier.pt"
+NUM_DIFFS   = 4      # ordered diffs per sample (4 = full window, 1 = legacy)
+
+# Temporal order of the postprocess_session.py window snapshots
+FRAME_ORDER = ["before", "mid_00", "mid_01", "mid_02", "after"]
 
 CLASS_NAMES = [
     "blue-CW",   "blue-CCW",
@@ -73,12 +83,17 @@ CLASS_NAMES = [
 
 class MoveDiffDataset(Dataset):
     """
-    Each sample is a temporal difference image: mid_01 - before.
+    Each sample is an ORDERED stack of temporal difference images across
+    the move window: consecutive diffs of [before, mid_00, mid_01, mid_02,
+    after] → 4 signed diffs → 12 input channels (num_diffs=4), or the
+    legacy single mid_01 − before diff (num_diffs=1).
 
-    This image is mostly grey (128) where nothing moved, and shows
+    Each diff is mostly grey (128) where nothing moved, and shows
     bright/dark regions exactly where stickers shifted during the turn.
-    The spatial pattern of those regions encodes which face turned (position)
-    and the direction (CW arc vs CCW arc produces mirrored patterns).
+    The spatial pattern encodes which face turned; the channel ORDER of
+    the stacked diffs encodes the motion's temporal direction — a CCW
+    turn is (approximately) the CW stack reversed, which a single diff
+    cannot represent.
 
     Label: ble_raw (0-11), read directly from moves_labeled.jsonl.
 
@@ -87,12 +102,20 @@ class MoveDiffDataset(Dataset):
       Labels 0,2,4,6,8,10 are CW (even) and 1,3,5,7,9,11 are CCW (odd).
       A horizontal flip must XOR the label with 1 to stay correct.
       This doubles the dataset for free with correct labels.
+      (The flip mirrors space only — channel order is untouched.)
     """
 
-    def __init__(self, session_dirs: list[Path], augment: bool = True):
-        self.samples  = []   # [(before_path, mid_path, label), ...]
-        self.augment  = augment
+    def __init__(self, session_dirs: list[Path], augment: bool = True,
+                 num_diffs: int = NUM_DIFFS):
+        self.samples   = []   # [(frame_paths, label), ...] in temporal order
+        self.augment   = augment
+        self.num_diffs = num_diffs
         self._load_sessions(session_dirs)
+
+    def _window_keys(self) -> list[str]:
+        if self.num_diffs == 1:
+            return ["before", "mid_01"]
+        return FRAME_ORDER
 
     def _load_sessions(self, session_dirs: list[Path]):
         skipped = 0
@@ -113,21 +136,20 @@ class MoveDiffDataset(Dataset):
                         continue
 
                     frames = m.get("frames", {})
-                    before_rel = frames.get("before")
-                    mid_rel    = frames.get("mid_01")
+                    paths  = []
+                    for key in self._window_keys():
+                        rel = frames.get(key)
+                        p   = session_dir / rel if rel else None
+                        if p is None or not p.exists():
+                            paths = None
+                            break
+                        paths.append(p)
 
-                    if not before_rel or not mid_rel:
+                    if paths is None:
                         skipped += 1
                         continue
 
-                    before_path = session_dir / before_rel
-                    mid_path    = session_dir / mid_rel
-
-                    if not before_path.exists() or not mid_path.exists():
-                        skipped += 1
-                        continue
-
-                    self.samples.append((before_path, mid_path, label))
+                    self.samples.append((paths, label))
 
         if skipped:
             print(f"  Skipped {skipped} moves (missing frames or invalid label)")
@@ -136,38 +158,28 @@ class MoveDiffDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        before_path, mid_path, label = self.samples[idx]
+        paths, label = self.samples[idx]
 
-        before = cv2.imread(str(before_path))
-        mid    = cv2.imread(str(mid_path))
+        imgs = [cv2.imread(str(p)) for p in paths]
+        if any(i is None for i in imgs):
+            # Fallback: neutral (no-motion) stack if a file is unreadable
+            stack = np.full((IMG_SIZE, IMG_SIZE, 3 * self.num_diffs), 128,
+                            dtype=np.uint8)
+            return self._to_tensor(stack), label
 
-        if before is None or mid is None:
-            # Fallback: return zeros if file somehow unreadable
-            diff = np.full((IMG_SIZE, IMG_SIZE, 3), 128, dtype=np.uint8)
-            return self._to_tensor(diff), label
-
-        # Resize both to model input size
-        before = cv2.resize(before, (IMG_SIZE, IMG_SIZE))
-        mid    = cv2.resize(mid,    (IMG_SIZE, IMG_SIZE))
-
-        # Temporal difference — shift to [0,255] range (128 = no change)
-        diff = (mid.astype(np.int16) - before.astype(np.int16) + 128)
-        diff = np.clip(diff, 0, 255).astype(np.uint8)
-
-        # Convert BGR→RGB
-        diff = cv2.cvtColor(diff, cv2.COLOR_BGR2RGB)
+        stack = build_diff_stack(imgs)
 
         # Augmentation
         if self.augment:
             # Horizontal flip: correct label by XOR 1 (CW↔CCW)
             if random.random() < 0.5:
-                diff  = np.fliplr(diff).copy()
+                stack = np.fliplr(stack).copy()
                 label = label ^ 1   # even→odd (CW→CCW) and vice versa
 
             # Brightness / contrast jitter (safe — doesn't change direction)
-            diff = self._jitter(diff)
+            stack = self._jitter(stack)
 
-        return self._to_tensor(diff), label
+        return self._to_tensor(stack), label
 
     def _jitter(self, img: np.ndarray) -> np.ndarray:
         """Random brightness and contrast adjustment."""
@@ -177,14 +189,11 @@ class MoveDiffDataset(Dataset):
         return img.astype(np.uint8)
 
     def _to_tensor(self, img: np.ndarray) -> torch.Tensor:
-        """HWC uint8 → CHW float32 normalised to ImageNet stats."""
-        t = torch.from_numpy(img.transpose(2, 0, 1)).float() / 255.0
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-        std  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-        return (t - mean) / std
+        """HWC uint8 (3K channels) → CHW float32, ImageNet stats per diff."""
+        return stack_to_tensor(img)
 
     def class_counts(self) -> dict[int, int]:
-        return dict(Counter(label for _, _, label in self.samples))
+        return dict(Counter(label for _, label in self.samples))
 
     def class_weights(self) -> torch.Tensor:
         """Inverse-frequency weights for weighted loss / sampler."""
@@ -196,18 +205,56 @@ class MoveDiffDataset(Dataset):
         return weights
 
 
+def build_diff_stack(frames_bgr: list[np.ndarray]) -> np.ndarray:
+    """
+    N ordered BGR frames → HWC uint8 stack of N-1 consecutive signed
+    diffs (RGB each), 128 = no change. Channel order = temporal order.
+    """
+    resized = [cv2.resize(f, (IMG_SIZE, IMG_SIZE)).astype(np.int16)
+               for f in frames_bgr]
+    diffs = []
+    for a, b in zip(resized, resized[1:]):
+        d = np.clip(b - a + 128, 0, 255).astype(np.uint8)
+        diffs.append(cv2.cvtColor(d, cv2.COLOR_BGR2RGB))
+    return np.concatenate(diffs, axis=2)
+
+
+def stack_to_tensor(img: np.ndarray) -> torch.Tensor:
+    """HWC uint8 (3K channels) → CHW float32 normalised, stats tiled ×K."""
+    k = img.shape[2] // 3
+    t = torch.from_numpy(img.transpose(2, 0, 1)).float() / 255.0
+    mean = torch.tensor([0.485, 0.456, 0.406]).repeat(k).view(-1, 1, 1)
+    std  = torch.tensor([0.229, 0.224, 0.225]).repeat(k).view(-1, 1, 1)
+    return (t - mean) / std
+
+
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
 
-def build_model(device: torch.device) -> nn.Module:
+def build_model(device: torch.device, num_diffs: int = NUM_DIFFS) -> nn.Module:
     """
     ResNet-18 pretrained on ImageNet, final layer replaced for 12 classes.
     All layers unfrozen — fine-tune the whole network.
     The pretrained features (edges, textures, shapes) transfer well
-    to motion-blur patterns in the diff image.
+    to motion-blur patterns in the diff images.
+
+    For num_diffs > 1 the first conv is inflated to 3*num_diffs input
+    channels by tiling the pretrained RGB kernels and dividing by
+    num_diffs, so initial activation magnitudes match the pretrained
+    network (standard channel-inflation trick from two-stream/I3D work).
     """
     model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+
+    if num_diffs > 1:
+        old = model.conv1
+        new = nn.Conv2d(3 * num_diffs, old.out_channels,
+                        kernel_size=old.kernel_size, stride=old.stride,
+                        padding=old.padding, bias=False)
+        with torch.no_grad():
+            new.weight.copy_(old.weight.repeat(1, num_diffs, 1, 1) / num_diffs)
+        model.conv1 = new
+
     model.fc = nn.Linear(model.fc.in_features, NUM_CLASSES)
     return model.to(device)
 
@@ -229,9 +276,10 @@ def train(args):
     print(f"  Move Classifier — Training")
     print(f"{'='*55}")
     print(f"  Sessions:  {len(session_dirs)}")
+    print(f"  Input:     {args.diffs} ordered diff(s) = {3*args.diffs} channels")
 
     # Build dataset
-    full_ds = MoveDiffDataset(session_dirs, augment=True)
+    full_ds = MoveDiffDataset(session_dirs, augment=True, num_diffs=args.diffs)
     if len(full_ds) == 0:
         sys.exit("No valid samples found. Run postprocess_session.py first.")
 
@@ -252,7 +300,7 @@ def train(args):
     # Train / val split (80/20, stratified by class)
     random.seed(42)
     indices_by_class = {c: [] for c in range(NUM_CLASSES)}
-    for i, (_, _, label) in enumerate(full_ds.samples):
+    for i, (_, label) in enumerate(full_ds.samples):
         indices_by_class[label].append(i)
 
     train_idx, val_idx = [], []
@@ -264,11 +312,12 @@ def train(args):
 
     from torch.utils.data import Subset
     train_ds = Subset(full_ds, train_idx)
-    val_ds   = Subset(MoveDiffDataset(session_dirs, augment=False), val_idx)
+    val_ds   = Subset(MoveDiffDataset(session_dirs, augment=False,
+                                      num_diffs=args.diffs), val_idx)
 
     # Weighted sampler — oversample rare classes in each batch
     sample_weights = full_ds.class_weights()
-    train_weights  = [sample_weights[full_ds.samples[i][2]].item()
+    train_weights  = [sample_weights[full_ds.samples[i][1]].item()
                       for i in train_idx]
     sampler = WeightedRandomSampler(train_weights, len(train_weights))
 
@@ -289,7 +338,7 @@ def train(args):
         print(f"  Device: CPU")
 
     # Model, loss, optimiser
-    model     = build_model(device)
+    model     = build_model(device, num_diffs=args.diffs)
     # Weighted cross-entropy handles class imbalance in the loss
     criterion = nn.CrossEntropyLoss(
         weight=full_ds.class_weights().to(device)
@@ -353,6 +402,7 @@ def train(args):
                 "state_dict":model.state_dict(),
                 "val_acc":   val_acc,
                 "class_names":CLASS_NAMES,
+                "num_diffs": args.diffs,
             }, output_path)
 
     print(f"\n  Best val accuracy: {best_val_acc:.1f}%")
@@ -403,14 +453,18 @@ def evaluate(args):
                                if "*" in pattern else [Path(pattern)])]
     session_dirs = [d for d in session_dirs if d.is_dir()]
 
-    full_ds = MoveDiffDataset(session_dirs, augment=False)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ckpt   = torch.load(args.model, map_location=device)
+    num_diffs = ckpt.get("num_diffs", 1)   # pre-stack checkpoints were 1-diff
+
+    full_ds = MoveDiffDataset(session_dirs, augment=False, num_diffs=num_diffs)
     if len(full_ds) == 0:
         sys.exit("No samples found.")
 
     # Reproduce the exact same stratified val split as training
     random.seed(42)
     indices_by_class = {c: [] for c in range(NUM_CLASSES)}
-    for i, (_, _, label) in enumerate(full_ds.samples):
+    for i, (_, label) in enumerate(full_ds.samples):
         indices_by_class[label].append(i)
 
     val_idx = []
@@ -423,13 +477,10 @@ def evaluate(args):
     val_ds  = Subset(full_ds, val_idx)
     loader  = DataLoader(val_ds, batch_size=args.batch, shuffle=False, num_workers=0)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model  = build_model(device)
-
-    ckpt = torch.load(args.model, map_location=device)
+    model = build_model(device, num_diffs=num_diffs)
     model.load_state_dict(ckpt["state_dict"])
     print(f"\nLoaded model from {args.model}  (epoch {ckpt['epoch']}, "
-          f"val_acc={ckpt['val_acc']:.1f}% at save time)")
+          f"{num_diffs}-diff input, val_acc={ckpt['val_acc']:.1f}% at save time)")
     print(f"Evaluating on {len(val_ds)} held-out validation samples "
           f"(20% stratified split, same as training)\n")
 
@@ -442,50 +493,55 @@ def evaluate(args):
 
 _inference_model  = None
 _inference_device = None
+_inference_diffs  = NUM_DIFFS
 
 def load_for_inference(model_path: str = MODEL_PATH):
     """Load the trained model for use in a live pipeline."""
-    global _inference_model, _inference_device
+    global _inference_model, _inference_device, _inference_diffs
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model  = build_model(device)
     ckpt   = torch.load(model_path, map_location=device)
+    num_diffs = ckpt.get("num_diffs", 1)   # pre-stack checkpoints were 1-diff
+    model  = build_model(device, num_diffs=num_diffs)
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
     _inference_model  = model
     _inference_device = device
+    _inference_diffs  = num_diffs
     return model, device
 
 
-def predict(before_bgr: np.ndarray, mid_bgr: np.ndarray,
+def predict(frames_bgr: list[np.ndarray],
             model_path: str = MODEL_PATH) -> tuple[int, str, float]:
     """
-    Predict which face moved between before and mid frames.
+    Predict which face moved (and direction) from an ordered move window.
 
     Parameters
     ----------
-    before_bgr : np.ndarray  BGR frame before the move
-    mid_bgr    : np.ndarray  BGR frame at peak motion
+    frames_bgr : ordered BGR frames spanning the move — ideally the
+                 5-frame window [before, mid_00, mid_01, mid_02, after].
+                 Automatically subsampled to what the loaded model
+                 expects (a 1-diff model uses first + middle frame).
 
     Returns
     -------
     (class_id, class_name, confidence)
     """
-    global _inference_model, _inference_device
+    global _inference_model, _inference_device, _inference_diffs
 
     if _inference_model is None:
         load_for_inference(model_path)
 
-    before = cv2.resize(before_bgr, (IMG_SIZE, IMG_SIZE))
-    mid    = cv2.resize(mid_bgr,    (IMG_SIZE, IMG_SIZE))
+    need = _inference_diffs + 1
+    n    = len(frames_bgr)
+    if n < 2:
+        raise ValueError("predict() needs at least 2 frames in temporal order")
+    # Evenly resample the window to the frame count the model expects
+    # (duplicates allowed — a repeated frame yields a neutral diff).
+    idxs   = [round(i * (n - 1) / (need - 1)) for i in range(need)]
+    frames = [frames_bgr[i] for i in idxs]
 
-    diff = (mid.astype(np.int16) - before.astype(np.int16) + 128)
-    diff = np.clip(diff, 0, 255).astype(np.uint8)
-    diff = cv2.cvtColor(diff, cv2.COLOR_BGR2RGB)
-
-    t    = torch.from_numpy(diff.transpose(2, 0, 1)).float() / 255.0
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-    std  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-    t    = ((t - mean) / std).unsqueeze(0).to(_inference_device)
+    t = stack_to_tensor(build_diff_stack(frames))
+    t = t.unsqueeze(0).to(_inference_device)
 
     with torch.no_grad():
         logits = _inference_model(t)
@@ -509,6 +565,9 @@ if __name__ == "__main__":
     parser.add_argument("--epochs",  type=int,   default=40)
     parser.add_argument("--batch",   type=int,   default=32)
     parser.add_argument("--lr",      type=float, default=1e-4)
+    parser.add_argument("--diffs",   type=int,   default=NUM_DIFFS, choices=[1, 4],
+                        help="Ordered diffs per sample: 4 = full-window stack "
+                             "(default), 1 = legacy single diff (ablation)")
     parser.add_argument("--output",  type=str,   default=MODEL_PATH,
                         help="Where to save the best model")
     parser.add_argument("--eval",    action="store_true",

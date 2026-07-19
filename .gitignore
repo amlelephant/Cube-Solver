@@ -7,19 +7,26 @@ __pycache__/
 # Regenerate via the training scripts (cv/train.py, cv/cnn_classifier.py --train,
 # ble/train_move_classifier.py) rather than committing them.
 *.pt
+*.pt.bak
 *.task
 runs/
 training_runs/
+cv/detection/training_log_*.txt
+cv/detection/training_err_*.txt
 
 # Training data and datasets — large, re-collected rather than versioned in git.
-cv/face_dataset/
-cv/cube_dataset/
+cv/detection/face_dataset/
+cv/detection/cube_dataset/
+cv/detection/merged_dataset/
+cv/detection/merged_dataset_mblur/
 ble/training_data/
 
-# Precomputed pruning tables for cv/twophase/ (the vendored solver) — generated
-# on first solve() call (~1 min), cached to speed up subsequent runs.
+# Precomputed pruning tables for cv/solver/twophase/ (the vendored solver) —
+# generated on first solve() call (~1 min), cached to speed up subsequent runs.
 tables.json
 
 # OS
 Thumbs.db
 .DS_Store
+cv/labeling/autolabel_out/
+cv/labeling/sessions/

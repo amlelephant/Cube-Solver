@@ -121,9 +121,11 @@ else:
 # ── 5. Run inference on a test image or webcam ────────────────────────────
 import cv2
 import numpy as np
+from cube_detector import normalize_lighting
 
 def run_inference_on_frame(frame, label="test"):
-    results = model(frame, verbose=False, conf=0.10)  # very low conf to see anything
+    # Same lighting normalization the real pipeline applies before YOLO
+    results = model(normalize_lighting(frame), verbose=False, conf=0.5)
     boxes_found = 0
     for r in results:
         if r.boxes is None:

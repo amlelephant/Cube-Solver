@@ -18,6 +18,15 @@ import numpy as np
 # so printing them doesn't crash the process.
 sys.stdout.reconfigure(encoding="utf-8")
 
+# color_classifier/cnn_classifier/ensemble/cube_detector/twophase live in
+# sibling topic folders (cv/classification/, cv/detection/, cv/solver/) —
+# this script stays at cv/ root, so add them to sys.path to keep the
+# imports below bare.
+_CV_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_CV_ROOT, "detection"))
+sys.path.insert(0, os.path.join(_CV_ROOT, "classification"))
+sys.path.insert(0, os.path.join(_CV_ROOT, "solver"))
+
 PASS = "[PASS]"
 FAIL = "[FAIL]"
 WARN = "[WARN]"
@@ -88,28 +97,30 @@ check("cube_detector",  lambda: __import__("cube_detector"))
 check("state_finder (import)", lambda: (
     # Import without running main()
     __import__("importlib").util.spec_from_file_location(
-        "state_finder", "state_finder.py"),
+        "state_finder", os.path.join("solver", "state_finder.py")),
     "importable"
 )[1])
 
 # ── Model files ──────────────────────────────────────────────────────────────
 print("\nModel files:")
 
+YOLO_MODEL_PATH = os.path.join("detection", "cube_yolo.pt")
+CNN_MODEL_PATH  = os.path.join("classification", "sticker_cnn.pt")
+
 def _finetuned():
-    if os.path.exists("cube_yolo.pt"):
+    if os.path.exists(YOLO_MODEL_PATH):
         from ultralytics import YOLO
-        m = YOLO("cube_yolo.pt")
+        m = YOLO(YOLO_MODEL_PATH)
         nc = m.model.yaml.get("nc", "?")
-        return f"cube_yolo.pt loaded — {nc} class(es)"
-    raise FileNotFoundError("cube_yolo.pt not found — see TRAINING.md")
+        return f"{YOLO_MODEL_PATH} loaded — {nc} class(es)"
+    raise FileNotFoundError(f"{YOLO_MODEL_PATH} not found — see TRAINING.md")
 check("YOLO fine-tuned model (cube_yolo.pt)", _finetuned, warn_only=True)
 
 def _cnn_model():
-    from cnn_classifier import MODEL_PATH
-    if os.path.exists(MODEL_PATH):
-        return f"{MODEL_PATH} found"
+    if os.path.exists(CNN_MODEL_PATH):
+        return f"{CNN_MODEL_PATH} found"
     raise FileNotFoundError(
-        f"{MODEL_PATH} not found — run: python cnn_classifier.py --train")
+        f"{CNN_MODEL_PATH} not found — run: cd classification && python cnn_classifier.py --train")
 check("CNN colour model (sticker_cnn.pt)", _cnn_model, warn_only=True)
 
 # ── Pipeline smoke test (no webcam / no model needed) ────────────────────────
@@ -154,18 +165,17 @@ if errors == 0:
     print("  All required checks passed.\n")
     print("  Next steps:")
 
-    missing_yolo = not os.path.exists("cube_yolo.pt")
-    from cnn_classifier import MODEL_PATH
-    missing_cnn  = not os.path.exists(MODEL_PATH)
+    missing_yolo = not os.path.exists(YOLO_MODEL_PATH)
+    missing_cnn  = not os.path.exists(CNN_MODEL_PATH)
 
     if missing_yolo:
         print("  ★ Train the YOLO detector — follow TRAINING.md")
     if missing_cnn:
-        print("  ★ Train the colour CNN:  python cnn_classifier.py --train")
+        print("  ★ Train the colour CNN:  cd classification && python cnn_classifier.py --train")
     if not missing_yolo and not missing_cnn:
-        print("  ✓ All models present — run: python state_finder.py")
+        print("  ✓ All models present — run: cd solver && python state_finder.py")
     elif not missing_yolo:
-        print("  → Then run: python state_finder.py")
+        print("  → Then run: cd solver && python state_finder.py")
 else:
     print(f"  {errors} required check(s) FAILED — fix before continuing.")
     sys.exit(1)

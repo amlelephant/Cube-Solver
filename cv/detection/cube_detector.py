@@ -47,18 +47,26 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-FINE_TUNED_MODEL  = "detect_full_cube.pt"      # produced by your training run
-FALLBACK_MODEL    = "yolov8n.pt"        # generic pretrained, auto-downloaded
+# Resolved relative to this file, not the caller's cwd — this module gets
+# imported from sibling topic folders (cv/solver/, cv/labeling/) whose cwd
+# doesn't match cv/detection/ where these weights actually live.
+_MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
+FINE_TUNED_MODEL  = os.path.join(_MODEL_DIR, "detect_full_cube.pt")  # produced by your training run
+FALLBACK_MODEL    = os.path.join(_MODEL_DIR, "yolov8n.pt")           # generic pretrained, auto-downloaded
 
 # Run YOLO every N frames; use the tracker in between
 YOLO_INTERVAL     = 12
 
 # Minimum YOLO confidence to accept a detection
-YOLO_CONF         = 0.35
+YOLO_CONF         = 0.50
 
 # Minimum bounding-box area (fraction of frame area) to be a valid cube
 MIN_BOX_FRAC      = 0.015
 MAX_BOX_FRAC      = 0.92
+
+# Per-channel mean the frame is normalized to before YOLO inference.
+# 120 matches the daytime footage the detector was trained on.
+NORM_TARGET_MEAN  = 120.0
 
 # Inset from sticker edge when sampling colour (avoids border shadows)
 STICKER_INSET     = 5
@@ -241,6 +249,36 @@ def reset_tracker():
 # YOLO inference
 # ---------------------------------------------------------------------------
 
+def normalize_lighting(frame):
+    """
+    Gray-world lighting normalization: scale each BGR channel so its mean
+    lands on NORM_TARGET_MEAN.
+
+    The detector was trained almost entirely on daylight footage; warm
+    indoor lighting shifts the channel ratios far enough that confidence
+    collapses (measured 2026-07-15: median conf 0.02 at night vs 0.81 on
+    daytime frames, restored to 0.5+ by this correction). Brightness-only
+    scaling does NOT fix it — the cast is in the channel ratios.
+
+    Used for YOLO input only. Sticker patches for color classification are
+    cut from the raw frame, whose color cast the ensemble's per-session
+    calibration already accounts for.
+
+    Implemented as a per-channel 256-entry LUT: the scaling is a constant
+    per channel, so applying it via cv2.LUT is bit-identical to the
+    float-multiply version but ~50x faster (measured 43ms -> 0.9ms per
+    720p frame, 2026-07-18) — at 1 LUT per frame this was half the live
+    pipeline's frame budget.
+    """
+    means = cv2.mean(frame)[:3]
+    ramp = np.arange(256, dtype=np.float32)
+    lut = np.dstack([
+        np.clip(ramp * (NORM_TARGET_MEAN / max(m, 1.0)), 0, 255)
+        for m in means
+    ]).astype(np.uint8)
+    return cv2.LUT(frame, lut)
+
+
 def _run_yolo(model, frame, frame_area):
     """
     Run YOLO on the frame.  Returns (box, confidence) or (None, 0).
@@ -252,7 +290,7 @@ def _run_yolo(model, frame, frame_area):
     lower confidence floor — the cube will not be in COCO classes so this
     won't fire, but it lets you test the pipeline before training.
     """
-    results = model(frame, verbose=False, conf=YOLO_CONF)
+    results = model(normalize_lighting(frame), verbose=False, conf=YOLO_CONF)
 
     best_box  = None
     best_conf = 0.0

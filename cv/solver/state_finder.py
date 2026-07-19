@@ -26,12 +26,20 @@ Controls
 
 import cv2
 import numpy as np
+import os
 import sys
 
 # Some terminals (default Windows console codepages) can't encode the
 # unicode arrows/checkmarks used in this script's output — force UTF-8
 # so printing them doesn't crash the process.
 sys.stdout.reconfigure(encoding="utf-8")
+
+# cube_detector/ensemble/color_classifier live in sibling topic folders
+# (cv/detection/, cv/classification/) — this script is run from inside
+# cv/solver/, so add them to sys.path to keep the imports below bare.
+_CV_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_CV_ROOT, "detection"))
+sys.path.insert(0, os.path.join(_CV_ROOT, "classification"))
 
 from cube_detector import detect_and_extract, draw_sticker_overlay
 from ensemble      import classify_face, calibrate, reset_calibration, calibration_status
@@ -368,6 +376,86 @@ def print_results(scanned):
 
 
 # ---------------------------------------------------------------------------
+# Pre-scan color calibration
+# ---------------------------------------------------------------------------
+# Deliberately does NOT go through cube_detector — sampling a fixed box in
+# the frame needs no face detection at all, so this works even when face
+# detection itself is unreliable. That matters: the ensemble's orange/red
+# calibration (see ensemble.calibrate) previously only got seeded from a
+# successful full L-face scan, which meant it silently never activated in
+# practice when orange-face detection was the thing struggling most —
+# exactly backwards, since that's the face it's needed for. Sampling a
+# held-up single sticker directly removes that dependency entirely.
+CALIB_BOX_SIZE = 60
+CALIB_STEPS = [
+    ("red",    "Hold your cube's RED center sticker in the box"),
+    ("orange", "Now hold the ORANGE center sticker in the box"),
+]
+
+
+def _sample_calib_box(frame):
+    """Median HSV of the fixed calibration box in the (already-mirrored) frame."""
+    h, w = frame.shape[:2]
+    cx, cy = w // 2, h // 2
+    half = CALIB_BOX_SIZE // 2
+    roi = frame[cy - half:cy + half, cx - half:cx + half]
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    return (float(np.median(hsv[:, :, 0])),
+            float(np.median(hsv[:, :, 1])),
+            float(np.median(hsv[:, :, 2])))
+
+
+def run_calibration(cap):
+    """
+    Walk the user through sampling their actual RED and ORANGE center
+    stickers before scanning starts, so the orange/red tiebreak (the
+    hardest color pair — see ensemble.py) is calibrated to this camera and
+    lighting from face 1 onward instead of only kicking in after a
+    successful L-face scan.
+
+    Controls: C = capture   S = skip calibration   Q = quit
+    """
+    step = 0
+    while step < len(CALIB_STEPS):
+        ret, raw_frame = cap.read()
+        if not ret:
+            return  # let main() handle the lost-feed case
+
+        frame = cv2.flip(raw_frame, 1)
+        h, w = frame.shape[:2]
+        cx, cy = w // 2, h // 2
+        half = CALIB_BOX_SIZE // 2
+
+        display = frame.copy()
+        color_name, prompt = CALIB_STEPS[step]
+        box_bgr = COLOR_BGR.get(color_name, C_WHITE)
+        cv2.rectangle(display, (cx - half, cy - half), (cx + half, cy + half), box_bgr, 2)
+
+        draw_text(display, "Color calibration", 12, 30, C_WHITE, 0.75, 2)
+        draw_text(display, prompt, 12, 60, box_bgr, 0.55)
+        draw_text(display, f"Step {step + 1} of {len(CALIB_STEPS)}", 12, h - 46, C_GRAY, 0.45)
+        draw_text(display, "C = capture   S = skip   Q = quit", 12, h - 20, C_GRAY, 0.45)
+
+        cv2.imshow(WIN_NAME, display)
+        key = cv2.waitKey(1) & 0xFF
+
+        if key in (ord("q"), 27):
+            cap.release()
+            cv2.destroyAllWindows()
+            sys.exit(0)
+        elif key == ord("s"):
+            print("[INFO] Calibration skipped — using default orange/red threshold.")
+            return
+        elif key == ord("c"):
+            hh, ss, vv = _sample_calib_box(frame)
+            calibrate(color_name, hh, ss, vv)
+            print(f"[INFO] Calibrated {color_name}: h={hh:.0f} s={ss:.0f} v={vv:.0f}")
+            step += 1
+
+    print("[INFO] Color calibration complete.")
+
+
+# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 def main():
@@ -398,6 +486,8 @@ def main():
 
     cv2.namedWindow(WIN_NAME, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WIN_NAME, UI_WIDTH, UI_HEIGHT)
+
+    run_calibration(cap)  # seeds the orange/red boundary before any face is scanned
 
     print("\nControls: SPACE=scan  R=redo  D=debug  Q=quit\n")
 

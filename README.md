@@ -27,15 +27,16 @@ doesn't require anyone to own extra hardware.
 
 ## How it works (MVP path)
 
-1. **Cube face detection** (`cv/cube_detector.py`) — a fine-tuned YOLOv8
-   model locates the cube in frame, an OpenCV CSRT tracker follows it between
-   detection frames to stay real-time on CPU, and the located face is
+1. **Cube face detection** (`cv/detection/cube_detector.py`) — a fine-tuned
+   YOLOv8 model locates the cube in frame, an OpenCV CSRT tracker follows it
+   between detection frames to stay real-time on CPU, and the located face is
    perspective-warped into a flat image and sliced into 9 sticker patches.
-2. **Sticker color classification** (`cv/ensemble.py`,
-   `cv/cnn_classifier.py`, `cv/color_classifier.py`) — each sticker patch is
-   classified by both a small CNN and an HSV-threshold classifier; the two
-   are combined for a confidence-scored color call per sticker.
-3. **Full-state scan** (`cv/state_finder.py`) — walks the user through
+2. **Sticker color classification** (`cv/classification/ensemble.py`,
+   `cv/classification/cnn_classifier.py`, `cv/classification/color_classifier.py`)
+   — each sticker patch is classified by both a small CNN and an
+   HSV-threshold classifier; the two are combined for a confidence-scored
+   color call per sticker.
+3. **Full-state scan** (`cv/solver/state_finder.py`) — walks the user through
    scanning all six faces (U/R/F/D/L/B), assembles the 54-sticker state
    string, and validates it against cube group theory using `kociemba`.
 4. **Verification** — run the scan once on the scrambled cube and once after
@@ -44,8 +45,10 @@ doesn't require anyone to own extra hardware.
 
 ## Repo structure
 
-- **`cv/`** — the MVP: cube detection, sticker classification, and the
-  full-state scanner (`state_finder.py`). This is the active development
+- **`cv/`** — the MVP, split by topic: `detection/` (locating the cube),
+  `classification/` (sticker color), `labeling/` (dataset capture +
+  labeling tools), `solver/` (the full-state scanner, `state_finder.py`,
+  and the vendored group-theory solver). This is the active development
   focus.
 - **`ble/`** — smart-cube (GoCube/Rubik's Connected) Bluetooth integration
   and a per-move classifier trained on webcam + BLE move data. This is a
@@ -66,26 +69,29 @@ pip install -r requirements.txt
 ```
 
 Cube-state solve validation uses a vendored pure-Python solver
-(`cv/twophase/`, MIT licensed — see `cv/twophase/LICENSE.txt`) instead of
-the `kociemba` PyPI package, which ships no Windows wheel and needs a C
-compiler to build from source. Nothing extra to install for it. Its first
-call precomputes pruning tables (~30-60s, cached afterward to
-`cv/tables.json`, gitignored).
+(`cv/solver/twophase/`, MIT licensed — see `cv/solver/twophase/LICENSE.txt`)
+instead of the `kociemba` PyPI package, which ships no Windows wheel and
+needs a C compiler to build from source. Nothing extra to install for it.
+Its first call precomputes pruning tables (~30-60s, cached afterward to
+`cv/solver/tables.json`, gitignored).
 
 ## Running it
 
-From inside `cv/`:
+Each script runs from inside its own subfolder (bare model/dataset
+filenames — see CLAUDE.md):
 
 ```
-python test_install.py     # verifies dependencies, models, and runs a smoke test — start here
-python state_finder.py     # full 6-face scan + solve verification demo
+cd cv
+python test_install.py             # verifies dependencies, models, and runs a smoke test — start here
+cd solver
+python state_finder.py             # full 6-face scan + solve verification demo
 ```
 
 Model weights (`*.pt`) referenced by these scripts are trained artifacts and
 are not committed to this repo (see `.gitignore`) — `test_install.py` will
 tell you which ones are missing and how to train them
-(`cv/train.py` for the YOLO detector, `cv/cnn_classifier.py --train` for the
-sticker classifier).
+(`cv/detection/train.py` for the YOLO detector,
+`cv/classification/cnn_classifier.py --train` for the sticker classifier).
 
 The optional smart-cube path lives in `ble/`; see the docstring at the top
 of `ble/cube_ble.py` for usage.

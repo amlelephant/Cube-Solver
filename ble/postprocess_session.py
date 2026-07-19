@@ -17,6 +17,21 @@ Output added to the session folder:
         move_0001_after.jpg      STILL  (T + 250ms)
     moves_labeled.jsonl
     metadata.json
+
+Once labeled/ is written, the raw frames/ directory (every captured frame,
+~10-20x more images than labeled/ needs) is deleted — pass --keep-frames to
+keep it. frames.jsonl (the timestamp index, negligible size) is left in
+place either way.
+
+Window offsets above are the MAXIMUMS, used when a move has room around
+it. During fast sequences (algorithms) consecutive BLE events arrive
+closer together than the window span — measured median inter-move gap in
+real sessions is ~180-210ms vs. the 400ms fixed window — so a fixed
+window bleeds the neighboring moves' motion into 'before'/'after' frames
+that are labeled STILL. Each move's window is therefore sandwiched to at
+most half the gap to its temporal neighbors (never crossing the
+midpoint), with the mid offsets compressed proportionally: a fast turn's
+peak motion sits proportionally closer to its BLE timestamp.
 """
 
 import argparse
@@ -25,7 +40,9 @@ import shutil
 import sys
 from pathlib import Path
 
-# Time offsets relative to BLE event timestamp T
+# MAXIMUM time offsets relative to BLE event timestamp T — per-move
+# windows are shrunk from these when neighboring moves are close (see
+# module docstring).
 WINDOWS = {
     "before": -0.150,
     "mid_00": +0.030,
@@ -33,6 +50,31 @@ WINDOWS = {
     "mid_02": +0.100,
     "after":  +0.250,
 }
+
+BASE_PRE   = -WINDOWS["before"]   # max span before T
+BASE_POST  = WINDOWS["after"]     # max span after T
+MIN_SPAN   = 0.033                # one frame at 30fps — never shrink below
+HALF_FRAME = 0.017                # matching tolerance beyond the sandwich
+
+
+def move_window(gap_prev: float | None, gap_next: float | None) -> dict:
+    """
+    Per-move window offsets, sandwiched to half the gap to each
+    neighboring move (None = no neighbor on that side).
+    """
+    pre  = BASE_PRE  if gap_prev is None else \
+        min(BASE_PRE,  max(MIN_SPAN, 0.5 * gap_prev))
+    post = BASE_POST if gap_next is None else \
+        min(BASE_POST, max(MIN_SPAN, 0.5 * gap_next))
+
+    scale = post / BASE_POST
+    return {
+        "before": -pre,
+        "mid_00": WINDOWS["mid_00"] * scale,
+        "mid_01": WINDOWS["mid_01"] * scale,
+        "mid_02": WINDOWS["mid_02"] * scale,
+        "after":  post,
+    }
 
 MOTION_LABELS = {
     "before": "STILL",
@@ -70,7 +112,8 @@ def find_nearest(frame_times: list[float], frame_recs: list[dict],
     return frame_recs[best] if abs(frame_times[best]-target) <= max_gap else None
 
 
-def postprocess(session_dir: Path, dry_run: bool = False):
+def postprocess(session_dir: Path, dry_run: bool = False,
+                keep_frames: bool = False):
     # Check required files exist
     for req in ["moves.jsonl", "frames.jsonl", "config.json"]:
         if not (session_dir / req).exists():
@@ -102,26 +145,44 @@ def postprocess(session_dir: Path, dry_run: bool = False):
     if not dry_run:
         labeled_dir.mkdir(exist_ok=True)
 
-    labeled_moves = []
-    missing       = 0
-    total_frames  = 0
-    still_count   = 0
-    moving_count  = 0
+    labeled_moves  = []
+    missing        = 0
+    total_frames   = 0
+    still_count    = 0
+    moving_count   = 0
+    squeezed_count = 0
 
-    for move in moves:
+    for i, move in enumerate(moves):
         t        = move["timestamp"]
         move_num = move["move_num"]
         label    = f"move_{move_num:04d}"
         frame_paths = {}
 
-        for win_name, offset in WINDOWS.items():
+        gap_prev = t - moves[i-1]["timestamp"] if i > 0 else None
+        gap_next = moves[i+1]["timestamp"] - t if i < len(moves) - 1 else None
+        offsets  = move_window(gap_prev, gap_next)
+        squeezed = (-offsets["before"] < BASE_PRE - 1e-9
+                    or offsets["after"] < BASE_POST - 1e-9)
+        if squeezed:
+            squeezed_count += 1
+
+        # A matched frame must stay inside this move's sandwich — with
+        # capture gaps the nearest frame to a target can otherwise sit in
+        # a neighboring move's territory.
+        lo_ts = t + offsets["before"] - HALF_FRAME
+        hi_ts = t + offsets["after"]  + HALF_FRAME
+
+        for win_name, offset in offsets.items():
             nearest = find_nearest(frame_times, frame_recs, t + offset)
+            if nearest is not None and not (lo_ts <= nearest["ts"] <= hi_ts):
+                nearest = None
+
             if nearest is None:
                 frame_paths[win_name] = None
                 missing += 1
                 if dry_run:
-                    print(f"  [{label}] {win_name:<8}  NO FRAME FOUND "
-                          f"(target t+{offset*1000:.0f}ms)")
+                    print(f"  [{label}] {win_name:<8}  NO FRAME IN WINDOW "
+                          f"(target t{offset*1000:+.0f}ms)")
                 continue
 
             src = frames_dir / nearest["file"]
@@ -134,8 +195,10 @@ def postprocess(session_dir: Path, dry_run: bool = False):
             gap_ms = abs(nearest["ts"] - (t + offset)) * 1000
 
             if dry_run:
-                print(f"  [{label}] {win_name:<8}  gap={gap_ms:5.1f}ms"
+                print(f"  [{label}] {win_name:<8}  t{offset*1000:+6.0f}ms"
+                      f"  gap={gap_ms:5.1f}ms"
                       f"  [{MOTION_LABELS[win_name]}]"
+                      f"{'  [squeezed]' if squeezed else ''}"
                       f"  ← {nearest['file']}")
             else:
                 shutil.copy2(src, labeled_dir / f"{label}_{win_name}.jpg")
@@ -149,8 +212,10 @@ def postprocess(session_dir: Path, dry_run: bool = False):
 
         labeled_moves.append({
             **move,
-            "frames":        frame_paths,
-            "motion_labels": MOTION_LABELS,
+            "frames":         frame_paths,
+            "motion_labels":  MOTION_LABELS,
+            "window_offsets": {k: round(v, 4) for k, v in offsets.items()},
+            "window_squeezed": squeezed,
         })
 
     if not dry_run:
@@ -166,6 +231,7 @@ def postprocess(session_dir: Path, dry_run: bool = False):
             "still_frames":   still_count,
             "moving_frames":  moving_count,
             "missing_windows":missing,
+            "squeezed_windows":squeezed_count,
             "wca_sequence":   [m["wca_notation"] for m in moves
                                if m.get("wca_notation")],
         }
@@ -174,6 +240,8 @@ def postprocess(session_dir: Path, dry_run: bool = False):
 
     print(f"  Labeled:  {len(labeled_moves)} moves  "
           f"({total_frames} frames: {still_count} STILL, {moving_count} MOVING)")
+    print(f"  Squeezed: {squeezed_count} windows tightened to fit between "
+          f"neighboring moves")
     if missing:
         print(f"  Missing:  {missing} windows (frame capture gap or timing)")
     else:
@@ -183,6 +251,13 @@ def postprocess(session_dir: Path, dry_run: bool = False):
         print(f"\n  → {session_dir}/moves_labeled.jsonl")
         print(f"  → {labeled_dir}/")
 
+        if not keep_frames and frames_dir.is_dir():
+            freed = sum(f.stat().st_size for f in frames_dir.glob("*")
+                       if f.is_file())
+            shutil.rmtree(frames_dir)
+            print(f"  Deleted raw frames/ ({freed / 1e6:.1f} MB freed) — "
+                  f"labeled/ frames are kept for training.")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -190,6 +265,15 @@ if __name__ == "__main__":
                         help="Session folder from record_training.py")
     parser.add_argument("--dry-run", action="store_true",
                         help="Preview alignment without writing files")
+    parser.add_argument("--keep-frames", action="store_true",
+                        help="Keep the raw frames/ directory (all captured "
+                             "frames) instead of deleting it after "
+                             "labeled/ is written. Raw frames take far "
+                             "more storage than labeled/ and are only "
+                             "needed for flow_direction.py's experimental "
+                             "'stream'/'stream-peak' sources or to "
+                             "re-postprocess with different window "
+                             "offsets.")
     args = parser.parse_args()
 
     d = Path(args.session)
@@ -197,4 +281,4 @@ if __name__ == "__main__":
         print(f"ERROR: {d} not found")
         sys.exit(1)
 
-    postprocess(d, dry_run=args.dry_run)
+    postprocess(d, dry_run=args.dry_run, keep_frames=args.keep_frames)

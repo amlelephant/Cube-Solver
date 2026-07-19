@@ -1,5 +1,13 @@
 # Core CV pipeline (cv/) — pinned to what's installed and verified working in .venv.
-opencv-python==5.0.0.93
+# opencv-contrib-python, NOT opencv-python: cube_detector.py's two-stage
+# YOLO+tracker pipeline needs cv2.TrackerCSRT_create()/TrackerKCF_create(),
+# which only ship in the contrib build. With base opencv-python installed,
+# tracker creation silently fails, the tracker is never used, and YOLO runs
+# unsmoothed on every single frame instead of every Nth frame -- a real
+# cause of "hard to get detection to lock on" (fixed 2026-07-14; if you
+# have opencv-python installed, `pip uninstall opencv-python -y` first,
+# the two packages can't coexist in the same environment).
+opencv-contrib-python==5.0.0.93
 numpy==2.5.1
 torch==2.13.0
 torchvision==0.28.0

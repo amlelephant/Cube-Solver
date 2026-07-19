@@ -26,6 +26,17 @@ parser.add_argument("--imgsz",  type=int,   default=640,
                     help="Input image size (default: 640; use 416 on CPU)")
 parser.add_argument("--data",   type=str,   default="face_dataset/data.yaml",
                     help="Path to dataset data.yaml")
+parser.add_argument("--model",  type=str,   default="yolov8n.pt",
+                    help="Base weights to fine-tune (default: yolov8n.pt; "
+                         "yolov8s.pt for higher accuracy on a decent GPU)")
+parser.add_argument("--name",   type=str,   default="cube_yolo",
+                    help="Run name under runs/detect/ (default: cube_yolo)")
+parser.add_argument("--patience", type=int, default=15,
+                    help="Early-stop patience in epochs (default: 15)")
+parser.add_argument("--no-copy", action="store_true",
+                    help="Don't copy best.pt over cube_yolo.pt afterwards "
+                         "(for experiments that shouldn't touch the deployed "
+                         "weights)")
 parser.add_argument("--cpu",    action="store_true",
                     help="Force CPU training even if a GPU is available")
 args = parser.parse_args()
@@ -91,9 +102,9 @@ if(__name__ == '__main__'):
         sys.exit(1)
 
     # ── Load base model ────────────────────────────────────────────────────────
-    print("Loading YOLOv8n pretrained weights...")
-    print("(Downloads ~6MB on first run)\n")
-    model = YOLO("yolov8n.pt")
+    print(f"Loading pretrained weights: {args.model}")
+    print("(Downloads on first run)\n")
+    model = YOLO(args.model)
 
     # ── Train ──────────────────────────────────────────────────────────────────
     print("Starting training...\n")
@@ -103,22 +114,31 @@ if(__name__ == '__main__'):
         imgsz     = args.imgsz,
         batch     = args.batch,
         device    = device,
-        name      = "cube_yolo",
-        patience  = 15,          # early stop if val mAP doesn't improve for 15 epochs
+        name      = args.name,
+        patience  = args.patience,  # early stop if val mAP doesn't improve
         amp       = (device != "cpu"),  # mixed precision: GPU only
         plots     = True,        # saves results.png and val prediction images
         verbose   = True,
+        hsv_h     = 0.06,        # wider hue aug — indoor lighting shifts color
+                                 # far beyond the 0.015 default (see 2026-07-15
+                                 # night-lighting diagnosis)
     )
 
     # ── Copy best weights to project root ─────────────────────────────────────
-    src = os.path.join("runs", "detect", "cube_yolo", "weights", "best.pt")
+    # results.save_dir, not a hardcoded path: when runs/detect/cube_yolo already
+    # exists ultralytics writes to cube_yolo2/3/..., and the hardcoded path would
+    # silently copy a previous run's weights.
+    src = os.path.join(str(results.save_dir), "weights", "best.pt")
     dst = "cube_yolo.pt"
 
     print("\n" + "=" * 55)
 
     if os.path.exists(src):
-        shutil.copy(src, dst)
-        print(f"  Model saved to: {dst}")
+        if args.no_copy:
+            print(f"  --no-copy: weights left at {src}")
+        else:
+            shutil.copy(src, dst)
+            print(f"  Model saved to: {dst}")
 
         # Print final metrics
         metrics = results  # ultralytics returns Results object

@@ -40,7 +40,10 @@ except ImportError:
 from color_classifier import CLASSES
 NUM_CLASSES = len(CLASSES)
 PATCH_SIZE   = 32          # CNN input: 32×32 px per sticker region
-MODEL_PATH   = "sticker_cnn.pt"
+# Resolved relative to this file, not the caller's cwd — this module gets
+# imported (via ensemble.py) from sibling topic folders (cv/solver/,
+# cv/labeling/) whose cwd doesn't match cv/classification/.
+MODEL_PATH   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sticker_cnn.pt")
 
 # Canonical BGR color for each class (used in synthetic data generation)
 # These are approximate midpoint colors; augmentation creates the variation.

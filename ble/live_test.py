@@ -3,7 +3,9 @@ live_test.py
 
 Live webcam test for the trained move classifier.
 No BLE cube required — uses frame-delta motion detection to find move windows,
-then runs predict() on the (before, mid) pair exactly as the model was trained.
+then runs predict() on the ordered frame window [before, mids..., after]
+exactly as the model was trained (predict() adapts the window to the
+loaded checkpoint's 1-diff or 4-diff input).
 
 Controls:
     Q / Escape   quit
@@ -68,7 +70,7 @@ CLASS_COLORS = {
 class MotionGate:
     """
     Tracks STILL / MOVING state using frame-delta on the full frame.
-    Returns the best (before, mid) pair when a move window completes.
+    Returns the ordered move window when a move completes.
     """
 
     def __init__(self, threshold: float, buffer_seconds: float,
@@ -95,7 +97,9 @@ class MotionGate:
             state   str    "STILL" | "MOVING"
             delta   float  raw frame-delta value
             result  tuple | None
-                    On MOVING→STILL transition: (before_bgr, mid_bgr, peak_delta)
+                    On MOVING→STILL transition:
+                    (frames, peak_delta) where frames is the ordered
+                    5-frame window [before, mid x3, after]
                     Otherwise: None
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
@@ -126,14 +130,20 @@ class MotionGate:
             self._motion_window.append((delta, frame.copy()))
 
         elif self._state == "STILL":
-            # Transition from MOVING → STILL: extract best frame pair
+            # Transition from MOVING → STILL: assemble the ordered window
             if prev_state == "MOVING" and self._motion_window:
                 before = self._last_still_frame
-                # Mid frame = frame with highest delta during motion window
-                peak_delta, mid = max(self._motion_window, key=lambda x: x[0])
+                peak_delta = max(d for d, _ in self._motion_window)
 
-                if before is not None and mid is not None:
-                    result = (before, mid, peak_delta)
+                if before is not None:
+                    # 3 evenly spaced motion frames (duplicates ok when
+                    # the turn spanned fewer than 3 frames) + the current
+                    # frame as 'after' — mirrors the training window
+                    # [before, mid_00, mid_01, mid_02, after].
+                    n    = len(self._motion_window)
+                    mids = [self._motion_window[round(i * (n - 1) / 2)][1]
+                            for i in range(3)]
+                    result = ([before] + mids + [frame.copy()], peak_delta)
 
                 self._motion_window.clear()
 
@@ -246,8 +256,8 @@ def run(args):
 
         # If a complete move window was detected, run the classifier
         if move_window is not None:
-            before_bgr, mid_bgr, peak_delta = move_window
-            cls_id, cls_name, conf = predict(before_bgr, mid_bgr, args.model)
+            window_frames, peak_delta = move_window
+            cls_id, cls_name, conf = predict(window_frames, args.model)
             history.append((cls_name, conf))
             last_pred_name = cls_name
             last_pred_conf = conf
