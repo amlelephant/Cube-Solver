@@ -14,7 +14,7 @@ Controls:
 
 Usage:
     python live_test.py
-    python live_test.py --model move_classifier.pt --camera 0 --threshold 12
+    python live_test.py --model move_classifier_ble.pt --camera 0 --threshold 12
 """
 
 import argparse
@@ -28,7 +28,7 @@ import numpy as np
 # Config
 # ---------------------------------------------------------------------------
 
-DELTA_THRESHOLD     = 10.0   # mean abs pixel diff to declare MOVING
+DELTA_THRESHOLD     = 3.5   # mean abs pixel diff to declare MOVING
                               # run with --debug and watch the delta value;
                               # set this just above your camera's noise floor
 STILL_CONFIRM       = 4      # consecutive STILL frames before declaring settled
@@ -37,16 +37,12 @@ BUFFER_SECONDS      = 1.5    # how many seconds of frames to keep in memory
 HISTORY_DISPLAY     = 8      # number of recent predictions to show on screen
 IMG_SIZE            = 224    # must match training
 
-CLASS_NAMES = [
-    "blue-CW",   "blue-CCW",
-    "green-CW",  "green-CCW",
-    "white-CW",  "white-CCW",
-    "yellow-CW", "yellow-CCW",
-    "red-CW",    "red-CCW",
-    "orange-CW", "orange-CCW",
-]
-
-# BGR colours for each class label (for the on-screen display)
+# BGR colours for each class label (for the on-screen display).
+# Includes both label vocabularies: cube-relative colors (ble-labeled
+# checkpoints) and camera-relative WCA layers (wca-labeled checkpoints,
+# tinted by the conventional color scheme: U white, D yellow, F green,
+# B blue, R red, L orange — display only, implies nothing about the
+# actual face color).
 CLASS_COLORS = {
     "blue-CW":    (200, 80,  20 ),
     "blue-CCW":   (200, 80,  20 ),
@@ -60,6 +56,12 @@ CLASS_COLORS = {
     "red-CCW":    (40,  40,  210),
     "orange-CW":  (20,  140, 230),
     "orange-CCW": (20,  140, 230),
+    "U": (230, 230, 230), "U'": (230, 230, 230),
+    "D": (0,   220, 230), "D'": (0,   220, 230),
+    "F": (40,  180, 40 ), "F'": (40,  180, 40 ),
+    "B": (200, 80,  20 ), "B'": (200, 80,  20 ),
+    "R": (40,  40,  210), "R'": (40,  40,  210),
+    "L": (20,  140, 230), "L'": (20,  140, 230),
 }
 
 
@@ -225,6 +227,23 @@ def run(args):
         sys.exit(f"Model not found: {args.model}\n"
                  f"Train first: python train_move_classifier.py --sessions training_data/solve_*/")
 
+    # Cube detector for cropping move windows — mirrors training-time
+    # cache_crops.py: one shared box per move, cut from before/after.
+    detector = None
+    if not args.no_crop:
+        try:
+            import crop_utils
+            detector = crop_utils.load_detector()
+        except Exception as e:
+            print(f"WARNING: crop_utils unavailable ({e})")
+        if detector is None:
+            print("WARNING: cube detector unavailable — predicting on full "
+                  "frames.\n         (needs ultralytics + "
+                  "cv/detection/detect_full_cube.pt; use --no-crop to silence)")
+        else:
+            print("Cube detector loaded — move windows are cropped to the "
+                  "cube box, matching training.")
+
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
         sys.exit(f"Cannot open camera {args.camera}")
@@ -241,6 +260,7 @@ def run(args):
     debug   = args.debug
     last_pred_name = ""
     last_pred_conf = 0.0
+    last_box       = None    # most recent cube crop box, for the overlay
 
     print("Controls:  Q/Escape=quit   R=reset history   D=toggle debug\n")
 
@@ -257,14 +277,30 @@ def run(args):
         # If a complete move window was detected, run the classifier
         if move_window is not None:
             window_frames, peak_delta = move_window
+            crop_note = ""
+            if detector is not None:
+                # Detect on the still frames only (before/after) — the
+                # sharp ones; mid-turn blur just degrades the box.
+                box = crop_utils.move_crop_box(
+                    detector, [window_frames[0], window_frames[-1]])
+                if box is not None:
+                    window_frames = [crop_utils.crop(f, box)
+                                     for f in window_frames]
+                    last_box  = box
+                    crop_note = "  [cropped]"
+                else:
+                    crop_note = "  [no cube box — full frame]"
             cls_id, cls_name, conf = predict(window_frames, args.model)
             history.append((cls_name, conf))
             last_pred_name = cls_name
             last_pred_conf = conf
             print(f"  Detected: {cls_name:<14}  conf={conf*100:.0f}%"
-                  f"  (peak_delta={peak_delta:.1f})")
+                  f"  (peak_delta={peak_delta:.1f}){crop_note}")
 
         # Draw UI
+        if last_box is not None:
+            cv2.rectangle(display, last_box[:2], last_box[2:],
+                          (140, 140, 140), 1)
         draw_state_bar(display, state, delta, args.threshold, debug)
         if last_pred_name:
             draw_prediction(display, last_pred_name, last_pred_conf)
@@ -309,12 +345,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Live webcam test for the move classifier"
     )
-    parser.add_argument("--model",     type=str,   default="move_classifier.pt")
+    parser.add_argument("--model",     type=str,   default="move_classifier_wca.pt")
     parser.add_argument("--camera",    type=int,   default=0)
     parser.add_argument("--threshold", type=float, default=DELTA_THRESHOLD,
                         help="Frame-delta motion threshold (default 10.0). "
                              "Run with --debug and turn slowly to calibrate.")
     parser.add_argument("--debug",     action="store_true",
                         help="Show delta bar and threshold line overlay")
+    parser.add_argument("--no-crop",   action="store_true",
+                        help="Skip cube-detector cropping and predict on "
+                             "full frames (only correct for models trained "
+                             "without crops.json)")
     args = parser.parse_args()
     run(args)
