@@ -9,9 +9,19 @@
 # the two packages can't coexist in the same environment).
 opencv-contrib-python==5.0.0.93
 numpy==2.5.1
-torch==2.13.0
-torchvision==0.28.0
 ultralytics==8.4.93
+
+# PyTorch — CUDA build, pinned with the +cu130 local version AND the index
+# that serves it. Both parts are load-bearing: plain `torch==2.13.0` resolves
+# to the CPU-only wheel on PyPI, which is what was installed here until
+# 2026-07-21. It imports and trains fine, so nothing errors — you just get
+# torch.cuda.is_available() == False and ~28x slower training, silently.
+# cu130 targets CUDA 13.0 and carries sm_120, required by RTX 50-series
+# (Blackwell) cards; the cu118/cu121/cu124 indexes predate sm_120 and will
+# fail at runtime on this GPU even though they install cleanly.
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.13.0+cu130
+torchvision==0.28.0+cu130
 
 # Cube-state validation (cv/state_finder.py, cv/test_install.py) uses the
 # vendored pure-Python solver at cv/twophase/ (MIT licensed, no separate
