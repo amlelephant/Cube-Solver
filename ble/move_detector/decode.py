@@ -14,19 +14,52 @@ machine sees one uninterrupted MOVING run.
 
 Refractory period
 -----------------
-MIN_SEP suppresses peaks closer together than N frames. Measured over the
-recorded sessions, inter-move gaps have p1 = 2.7 frames and p5 = 4.5
-frames at 30fps, so MIN_SEP=3 preserves ~99% of real move pairs.
+MIN_SEP suppresses peaks closer together than N frames. At 30fps a 1-frame
+gap is 33ms and a 2-frame gap is 67ms, which is the regime fast two-handed
+solving actually produces — 28% of held-out onsets have a neighbour under
+150ms.
 
-It cannot preserve all of them, and that is a property of the data rather
-than of this decoder: 1.8% of consecutive move pairs arrive under 100ms
-apart, and 97% of those are on DIFFERENT faces (U->R', R->U'). Those are
-two-handed simultaneous turns — not fast sequential ones. They overlap in
-time, so no temporal model at any frame rate separates them into two
-peaks. Expect a recall ceiling near 98%, concentrated on exactly those
-pairs, and plan to recover them downstream: a group-theoretic decode
-against the scanned start and end states can insert a move the detector
-never saw, which per-move scoring alone cannot.
+MIN_SEP was 3 until 2026-07-22, picked from p1/p5 inter-move gaps measured
+on the 2026-07-21 sessions alone. Those sessions were slow (2.5% of pairs
+under 100ms), and against faster footage that setting was discarding turns
+the model had already found: every single sub-150ms miss bucketed as
+"suppressed", with a peak score of 0.80-0.98 against a 0.40 threshold. The
+model saw them; the decoder threw them away. MIN_SEP=2 recovers sub-150ms
+recall 73.8% -> 78.6% for 1.9 points of precision.
+
+MIN_SEP=1 measures identically to 2, because peak_pick requires a strict
+local maximum and two onsets one frame apart can never both be one. That
+is this decoder's hard floor, and it is a property of peak-picking rather
+than of the data.
+
+What is actually irreducible
+----------------------------
+An earlier version of this note claimed sub-100ms different-face pairs are
+two-handed simultaneous turns that "no temporal model at any frame rate"
+can separate, and predicted a recall ceiling near 98%. Both halves were
+wrong, and wrong in a way that steered work away from a recoverable
+problem — the ceiling was measured on data that contained almost no fast
+moves, and the impossibility claim was never tested.
+
+Fraction of crowded (<150ms) pairs whose score curve is a single merged
+hump rather than two resolvable peaks, measured on held-out sessions:
+
+    sigma=2.0 targets    45%
+    sigma=1.0 targets    34%
+
+Most crowded pairs are separable, and how many depends on the training
+target rather than on physics. At sigma=2 the Gaussian targets for two
+onsets 1-2 frames apart overlap into a single blob, so the supervision
+never asks for two peaks and the model cannot learn to emit them.
+Sharpening to sigma=1 moved sub-150ms recall 78.6% -> 83.5% with no loss
+above 150ms and no cost in timing error. See dataset.SIGMA.
+
+A residual floor is real — 14 of the 17 remaining sub-150ms misses are on
+different faces, consistent with genuinely overlapping two-handed turns —
+but it is smaller than the 2% claimed above and it is not fixed. Recover
+the remainder downstream regardless: a group-theoretic decode against the
+scanned start and end states can insert a move the detector never saw,
+which per-move scoring alone cannot.
 
 Metrics
 -------

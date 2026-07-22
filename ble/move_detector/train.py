@@ -301,6 +301,11 @@ def train(args):
                 "val_f1": agg["f1"],
                 "holdout": args.holdout,
                 "val_session_names": [s.name for s in val_s],
+                # Recorded so --eval can tell an unseen session from a
+                # trained-on one. Without it a later evaluation cannot know
+                # what this model has already memorised, and will happily
+                # report training-set fit as held-out performance.
+                "train_session_names": [s.name for s in train_s],
                 "sigma": args.sigma,
                 "clip_len": args.clip_len,
                 "threshold": args.threshold,
@@ -385,14 +390,65 @@ def evaluate(args):
     if not streams:
         sys.exit("No prepared sessions found. Run prepare_data.py first.")
 
-    names = set(ckpt.get("val_session_names", []))
-    val_s = [s for s in streams if s.name in names]
-    if not val_s:
-        sys.exit(f"None of this checkpoint's held-out sessions are present in "
-                 f"--sessions.\nIt was validated on: {', '.join(sorted(names))}")
-    if len(val_s) < len(names):
-        print(f"WARNING: {len(names) - len(val_s)} held-out session(s) not "
-              f"found in --sessions")
+    # Classify each requested session by what the checkpoint has seen of it.
+    #
+    # UNSEEN sessions — in neither list — are the whole point of evaluating a
+    # deployed model: a solve recorded in a new room is the strongest
+    # evidence there is, and it can never appear in val_session_names. An
+    # earlier version filtered to val_session_names and exited otherwise,
+    # which made a final-fit checkpoint (val_session_names == []) impossible
+    # to evaluate on anything at all.
+    #
+    # TRAIN sessions still have to be refused by default. Reporting those
+    # numbers as performance is the mistake the old guard existed to prevent,
+    # and that reason is a good one — it is just not a reason to reject data
+    # the model has never seen.
+    # None means the key is absent (older checkpoints); an empty list means
+    # the model genuinely trained on nothing. Conflating the two is how an
+    # evaluation ends up calling a training session "unseen".
+    trained_rec = ckpt.get("train_session_names")
+    held        = set(ckpt.get("val_session_names") or [])
+
+    if trained_rec is None:
+        print(f"\nWARNING: {args.model} does not record which sessions it "
+              f"trained on, so this\n"
+              f"  cannot tell an unseen session from a memorised one. Only "
+              f"the {len(held)} session(s)\n"
+              f"  it explicitly held out are safe to cite. Retrain to get a "
+              f"checkpoint that records it.")
+        held_s   = [s for s in streams if s.name in held]
+        other_s  = [s for s in streams if s.name not in held]
+        if not held_s and not args.allow_train_sessions:
+            sys.exit(
+                f"None of this checkpoint's held-out sessions are present, and "
+                f"its training set is unknown,\nso nothing here can be honestly "
+                f"reported. Pass --allow-train-sessions to score anyway "
+                f"(provenance unverified).")
+        eval_s   = held_s + (other_s if args.allow_train_sessions else [])
+        unseen_s = []
+        if other_s and not args.allow_train_sessions:
+            print(f"  Skipping {len(other_s)} session(s) of unknown provenance.")
+    else:
+        trained  = set(trained_rec)
+        unseen_s = [s for s in streams
+                    if s.name not in trained and s.name not in held]
+        held_s   = [s for s in streams if s.name in held]
+        train_s  = [s for s in streams if s.name in trained]
+
+        eval_s = unseen_s + held_s
+        if train_s and args.allow_train_sessions:
+            eval_s += train_s
+        if not eval_s:
+            sys.exit(
+                f"Every requested session is training data for {args.model}, "
+                f"so any number here would be memorisation.\n"
+                f"Record a new session, or pass --allow-train-sessions if you "
+                f"specifically want the training-set fit.")
+        if train_s and not args.allow_train_sessions:
+            print(f"\nSkipping {len(train_s)} training session(s) — "
+                  f"{', '.join(sorted(s.name for s in train_s))}\n"
+                  f"  (pass --allow-train-sessions to include them; the result "
+                  f"would be training-set fit, not performance)")
 
     model = build_model(device)
     model.load_state_dict(ckpt["state_dict"])
@@ -401,12 +457,21 @@ def evaluate(args):
         else ckpt.get("threshold", THRESHOLD)
     min_sep   = ckpt.get("min_sep", args.min_sep)
 
-    print(f"\nLoaded {args.model} (epoch {ckpt['epoch']}, "
-          f"val F1 {ckpt['val_f1']*100:.1f}% at save time)")
-    print(f"Evaluating on {len(val_s)} fully held-out session(s) at "
-          f"threshold {threshold:.2f}, min_sep {min_sep}")
+    v_f1 = ckpt.get("val_f1")
+    print(f"\nLoaded {args.model} (epoch {ckpt['epoch']}, sigma "
+          f"{ckpt.get('sigma', SIGMA)}, "
+          + (f"val F1 {v_f1*100:.1f}% at save time)" if v_f1
+             else "final fit — no held-out score of its own)"))
+    print(f"Evaluating {len(eval_s)} session(s) at threshold "
+          f"{threshold:.2f}, min_sep {min_sep}")
+    if unseen_s:
+        print(f"  {len(unseen_s)} never seen in any form  <- the number to cite")
+        for s in unseen_s:
+            print(f"      {s.name}")
+    if held_s:
+        print(f"  {len(held_s)} held out during that model's training")
 
-    agg, per_session, _ = evaluate_streams(model, val_s, device, threshold,
+    agg, per_session, _ = evaluate_streams(model, eval_s, device, threshold,
                                            min_sep, args.tolerance)
     report_final(agg, per_session, args)
 
@@ -463,6 +528,10 @@ if __name__ == "__main__":
     p.add_argument("--eval",    action="store_true",
                    help="Evaluate an existing checkpoint instead of training")
     p.add_argument("--model",   type=str,   default=MODEL_PATH)
+    p.add_argument("--allow-train-sessions", action="store_true",
+                   help="With --eval, also score sessions the checkpoint "
+                        "trained on. Off by default because that number is "
+                        "memorisation, not performance")
     args = p.parse_args()
 
     if args.clip_len <= 61:

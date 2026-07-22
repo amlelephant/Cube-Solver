@@ -18,10 +18,20 @@ Output added to the session folder:
     moves_labeled.jsonl
     metadata.json
 
-Once labeled/ is written, the raw frames/ directory (every captured frame,
-~10-20x more images than labeled/ needs) is deleted — pass --keep-frames to
-keep it. frames.jsonl (the timestamp index, negligible size) is left in
-place either way.
+The raw frames/ directory is KEPT by default. Pass --discard-frames to
+delete it once labeled/ is written, if you are short on disk.
+
+This default was the other way around until 2026-07-22, and it cost the
+eleven 2026-07-20 sessions. labeled/ keeps five frames per move, all
+within -150ms..+250ms of the BLE timestamp — so it is 100% positives with
+no inter-move negatives and no rotation footage. That is enough to train
+the move CLASSIFIER, which only ever sees a centred window, but it cannot
+train the onset DETECTOR, which learns mainly from what is NOT a turn.
+Deleting frames/ silently converts a session into one that can never be
+used for detection, and the loss is not recoverable by re-postprocessing.
+
+Keeping frames costs ~10-20x the disk of labeled/. That is the cheaper
+mistake.
 
 Window offsets above are the MAXIMUMS, used when a move has room around
 it. During fast sequences (algorithms) consecutive BLE events arrive
@@ -113,7 +123,7 @@ def find_nearest(frame_times: list[float], frame_recs: list[dict],
 
 
 def postprocess(session_dir: Path, dry_run: bool = False,
-                keep_frames: bool = False):
+                keep_frames: bool = True):
     # Check required files exist
     for req in ["moves.jsonl", "frames.jsonl", "config.json"]:
         if not (session_dir / req).exists():
@@ -265,15 +275,18 @@ if __name__ == "__main__":
                         help="Session folder from record_training.py")
     parser.add_argument("--dry-run", action="store_true",
                         help="Preview alignment without writing files")
+    parser.add_argument("--discard-frames", action="store_true",
+                        help="Delete the raw frames/ directory after "
+                             "labeled/ is written. Frames are kept by "
+                             "default: without them the session can never "
+                             "train the onset detector (labeled/ holds only "
+                             "move-centred positives), and that is not "
+                             "recoverable. Only pass this if you are sure "
+                             "you will never want move_detector/ to use "
+                             "this session.")
     parser.add_argument("--keep-frames", action="store_true",
-                        help="Keep the raw frames/ directory (all captured "
-                             "frames) instead of deleting it after "
-                             "labeled/ is written. Raw frames take far "
-                             "more storage than labeled/ and are only "
-                             "needed for flow_direction.py's experimental "
-                             "'stream'/'stream-peak' sources or to "
-                             "re-postprocess with different window "
-                             "offsets.")
+                        help=argparse.SUPPRESS)  # now the default; accepted
+                                                 # so old commands still run
     args = parser.parse_args()
 
     d = Path(args.session)
@@ -281,4 +294,4 @@ if __name__ == "__main__":
         print(f"ERROR: {d} not found")
         sys.exit(1)
 
-    postprocess(d, dry_run=args.dry_run, keep_frames=args.keep_frames)
+    postprocess(d, dry_run=args.dry_run, keep_frames=not args.discard_frames)

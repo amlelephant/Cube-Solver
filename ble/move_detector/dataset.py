@@ -24,6 +24,21 @@ This is the standard onset-detection formulation (same shape as audio
 onset detection), which is what makes peak-picking a sound decoder —
 see decode.py.
 
+Sigma has a cost the two reasons above do not mention: it sets how close
+two onsets can be and still be *representable* as two peaks. At sigma=2
+the bumps for onsets 1-2 frames apart merge into one blob, so the
+supervision never asks for two peaks there and no amount of data teaches
+the model to emit them. Measured on held-out sessions, 45% of pairs
+closer than 150ms came out as a single merged hump at sigma=2 versus 34%
+at sigma=1, and sub-150ms recall went 78.6% -> 83.5% with no regression
+above 150ms.
+
+SIGMA is 1.0 as of 2026-07-22, confirmed by two independent runs (34% and
+31% merged, against 45% at sigma=2). Note the positive mass roughly halves
+with it — measured 0.272 at sigma=2 against 0.148 at sigma=1 — so the
+"plain BCE works" claim above is weaker than it was, and a pos_weight
+around 1.8 is the untested next knob.
+
 Splitting
 ---------
 Whole sessions are held out, never individual clips. Clips from one
@@ -41,7 +56,9 @@ from torch.utils.data import Dataset
 
 STREAM_FILE = "detector_stream.npz"
 CLIP_LEN    = 96      # frames per training clip (~3.2s at 30fps)
-SIGMA       = 2.0     # Gaussian target width, in frames
+SIGMA       = 1.0     # Gaussian target width, in frames — see Targets above;
+                      # this also caps how close two onsets can be and still
+                      # be representable as two peaks
 
 
 class ArrayStream:
