@@ -9,9 +9,10 @@ Pipeline:
       -> train.py             this file
       -> decode.py            peak-picking + windows for the classifier
 
-Loss is plain BCE against the Gaussian onset targets from dataset.py. No
-positive reweighting: at sigma=2 with a ~13-frame median move gap the
-target already averages ~0.4.
+Loss is plain BCE against the Gaussian onset targets from dataset.py.
+--pos-weight can reweight the positive term but defaults to 1.0 (off):
+measured at sigma=1 it left sub-150ms recall unchanged and cost precision,
+so the class imbalance is not what limits this model. See dataset.py.
 
 Model selection is by ONSET F1 on held-out sessions, not by validation
 loss. Loss is measured per frame and is dominated by the easy negatives
@@ -242,7 +243,17 @@ def train(args):
           f"decode: thr={args.threshold} min_sep={args.min_sep} "
           f"tol=±{args.tolerance}f")
 
-    criterion = nn.BCEWithLogitsLoss()
+    # pos_weight scales the loss on the positive term. It exists because
+    # sigma controls how much positive mass the target has at all: measured
+    # mean target is 0.272 at sigma=2 but 0.148 at sigma=1, so sharpening
+    # the target also makes the problem ~1.8x more imbalanced, and plain BCE
+    # has correspondingly less pull toward firing. 1.0 keeps the original
+    # unweighted behaviour.
+    criterion = nn.BCEWithLogitsLoss(
+        pos_weight=torch.tensor(args.pos_weight, device=device)
+        if args.pos_weight != 1.0 else None)
+    if args.pos_weight != 1.0:
+        print(f"  Loss:   BCE with pos_weight={args.pos_weight:g}")
     optimizer = optim.AdamW(model.parameters(), lr=args.lr,
                             weight_decay=args.weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
@@ -307,6 +318,7 @@ def train(args):
                 # report training-set fit as held-out performance.
                 "train_session_names": [s.name for s in train_s],
                 "sigma": args.sigma,
+                "pos_weight": args.pos_weight,
                 "clip_len": args.clip_len,
                 "threshold": args.threshold,
                 "min_sep": args.min_sep,
@@ -488,6 +500,10 @@ if __name__ == "__main__":
     p.add_argument("--lr",      type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=1e-2)
     p.add_argument("--dropout", type=float, default=0.1)
+    p.add_argument("--pos-weight", type=float, default=1.0, dest="pos_weight",
+                   help="Weight on the positive BCE term. Sharper targets "
+                        "(lower --sigma) carry less positive mass, so >1 "
+                        "compensates. 1.0 = plain BCE (default)")
     p.add_argument("--clip-len", type=int,  default=CLIP_LEN,
                    help="Frames per training clip; must exceed the 61-frame "
                         "receptive field")

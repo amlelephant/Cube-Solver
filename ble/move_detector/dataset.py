@@ -34,10 +34,17 @@ at sigma=1, and sub-150ms recall went 78.6% -> 83.5% with no regression
 above 150ms.
 
 SIGMA is 1.0 as of 2026-07-22, confirmed by two independent runs (34% and
-31% merged, against 45% at sigma=2). Note the positive mass roughly halves
-with it — measured 0.272 at sigma=2 against 0.148 at sigma=1 — so the
-"plain BCE works" claim above is weaker than it was, and a pos_weight
-around 1.8 is the untested next knob.
+31% merged, against 45% at sigma=2).
+
+The positive mass roughly halves with it — measured 0.272 at sigma=2
+against 0.148 at sigma=1 — which looked like it should need a pos_weight
+of about 1.8 to compensate. It does not: pos_weight=1.8 at sigma=1 gives
+byte-identical sub-150ms recall (83.5%, the same 17 misses) while costing
+precision (92.5% -> 89.7%) and recall above 150ms (97.0% -> 96.2%). The
+imbalance was never what was limiting this, which in hindsight sigma=1
+already implied by winning despite it. train.py --pos-weight is kept,
+defaulting to 1.0, so the knob is there if a future target change makes it
+relevant.
 
 Splitting
 ---------
