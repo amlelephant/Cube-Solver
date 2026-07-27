@@ -79,7 +79,8 @@ if str(_BLE_DIR) not in sys.path:
 
 # Reuse the training-time window geometry rather than restating it — the
 # squeeze rule for closely spaced moves lives there.
-from postprocess_session import move_window, WINDOWS  # noqa: E402
+from postprocess_session import (move_window, WINDOWS,  # noqa: E402
+                                 HALF_FRAME)
 
 MIN_SEP   = 2      # frames; refractory period between accepted peaks
 THRESHOLD = 0.5    # score above which a peak counts
@@ -209,11 +210,133 @@ def format_metrics(m: dict, label: str = "") -> str:
             f"|err| {m['median_err']:.1f}f  bias {m['bias']:+.1f}f")
 
 
+def align_sequences(truth: list[str], pred: list[str]) -> list[tuple]:
+    """
+    Needleman-Wunsch alignment of the predicted sequence against the
+    prescribed one. Returns [(op, truth_move, pred_move), ...] where op is
+    one of "ok", "sub", "miss", "phantom".
+
+    Alignment rather than index-by-index comparison, because a single
+    missed move shifts every later index — position i of the prediction
+    stops corresponding to position i of the truth. Compared positionally,
+    one dropped move at the start reads as ~25 errors instead of 1, and the
+    whole measurement becomes noise.
+
+    The three non-"ok" ops map onto the three failure modes:
+      miss     detector never fired          -> recall problem
+      phantom  detector fired spuriously     -> precision problem
+      sub      detected, named wrong         -> classifier problem
+    """
+    n, m = len(truth), len(pred)
+    dp = np.zeros((n + 1, m + 1), dtype=np.int32)
+    dp[:, 0] = np.arange(n + 1)
+    dp[0, :] = np.arange(m + 1)
+
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            dp[i, j] = min(
+                dp[i - 1, j - 1] + (truth[i - 1] != pred[j - 1]),
+                dp[i - 1, j] + 1,      # truth move absent from pred = miss
+                dp[i, j - 1] + 1,      # extra pred move = phantom
+            )
+
+    ops: list[tuple] = []
+    i, j = n, m
+    while i > 0 or j > 0:
+        if (i > 0 and j > 0 and
+                dp[i, j] == dp[i - 1, j - 1] + (truth[i - 1] != pred[j - 1])):
+            same = truth[i - 1] == pred[j - 1]
+            ops.append(("ok" if same else "sub", truth[i - 1], pred[j - 1]))
+            i, j = i - 1, j - 1
+        elif i > 0 and dp[i, j] == dp[i - 1, j] + 1:
+            ops.append(("miss", truth[i - 1], None))
+            i -= 1
+        else:
+            ops.append(("phantom", None, pred[j - 1]))
+            j -= 1
+    return ops[::-1]
+
+
 # ---------------------------------------------------------------------------
 # Handoff to the move classifier
 # ---------------------------------------------------------------------------
 
-def onset_windows(onsets: np.ndarray, fps: float, n_frames: int
+def window_from_anchor(anchor: int, offsets: dict, fps: float, n_frames: int,
+                       frame_times: np.ndarray | None = None
+                       ) -> dict[str, int]:
+    """
+    The 5 frame indices for one move, given its anchor frame and the window
+    offsets in seconds.
+
+    Two ways to answer, and they are not the same answer:
+
+    `frame_times` given (PREFERRED) — pick the frame NEAREST IN TIME to
+        anchor_ts + offset, constrained to the move's sandwich. This is
+        postprocess_session's own rule, so the window is selected the way
+        the classifier's training windows were selected.
+
+    `frame_times` None (legacy) — index arithmetic, round(anchor +
+        offset*fps), against one global average fps.
+
+    WHICH frames land in the window genuinely matters, and window_audit.py
+    measured how much on 2456 moves (2026-07-26). Grouping moves by how many
+    of the 5 slots differ from the trainer's own choice, against the SAME
+    moves scored on the trainer's window:
+
+        differing   0      1      2      3      4      5
+        trainer   98.9%  98.6%  99.5%  98.2%  97.6% 100.0%
+        inference 98.9%  97.8%  95.8%  95.8%  91.9%  91.9%
+
+    Dose-response, and the trainer row is flat — so these are not harder
+    moves, the window is what costs the accuracy.
+
+    What this timestamp path does NOT do is close that gap. It raises exact
+    agreement with the trainer's window from 11% of moves to 33% (mean slots
+    differing 1.78 -> 1.38) and buys +0.3 points, which is not significant
+    (McNemar p=0.40, and the end-to-end rung moved -0.4, p=0.31). It was
+    predicted to be worth ~2 points and it is not; keep it because it is the
+    construction training used and because it is a prerequisite for
+    sub-frame anchoring, not because it measured as a win.
+
+    The residual is the ANCHOR, and it is irreducible without a change to the
+    detector: training anchored on the BLE timestamp itself, while inference
+    only knows which FRAME the onset peaked on. That quantises the anchor by
+    up to half a frame, which flips the nearest-frame choice for any target
+    sitting near a midpoint — and the mid offsets (+30/+60/+100ms) do sit
+    near midpoints at 30fps. Closing it needs either a sub-frame onset
+    regression head, or a classifier trained to be insensitive to the shift.
+    """
+    if frame_times is None:
+        return {key: int(np.clip(round(anchor + offsets[key] * fps),
+                                 0, n_frames - 1))
+                for key in WINDOWS}
+
+    ts = frame_times
+    t0 = float(ts[anchor])
+    lo_ts = t0 + offsets["before"] - HALF_FRAME
+    hi_ts = t0 + offsets["after"] + HALF_FRAME
+    # Frames inside this move's sandwich. postprocess_session dropped a move
+    # whose window had no frame in range; inference cannot drop a detected
+    # onset (that is a lost move), so it falls back to the nearest frame.
+    lo_i = int(np.searchsorted(ts, lo_ts, side="left"))
+    hi_i = int(np.searchsorted(ts, hi_ts, side="right")) - 1
+
+    out = {}
+    for key in WINDOWS:
+        target = t0 + offsets[key]
+        i = int(np.searchsorted(ts, target))
+        if i > 0 and (i >= len(ts) or
+                      abs(ts[i - 1] - target) < abs(ts[i] - target)):
+            i -= 1
+        i = int(np.clip(i, 0, n_frames - 1))
+        if lo_i <= hi_i:
+            i = int(np.clip(i, lo_i, min(hi_i, n_frames - 1)))
+        out[key] = i
+    return out
+
+
+def onset_windows(onsets: np.ndarray, fps: float, n_frames: int,
+                  frame_times: np.ndarray | None = None
                   ) -> list[dict[str, int]]:
     """
     Frame indices of the 5-frame window the move classifier expects, for
@@ -227,15 +350,30 @@ def onset_windows(onsets: np.ndarray, fps: float, n_frames: int
     the classifier is told are STILL.
 
     Neighbor gaps come from the DETECTED onsets, since at inference there
-    are no BLE timestamps to measure against.
+    are no BLE timestamps to measure against. That substitution is not free
+    and it does not fail where you would expect: a MISSED move makes the gap
+    between the two moves either side of it look twice as long, so both of
+    them skip a squeeze training would have applied and take in the motion
+    of the turn between them. Measured over 2456 moves, 4% of windows came
+    out >25% wider than their training counterpart for this reason, and the
+    classifier scored 72.5% on them against 90.1% with the true gaps. The
+    detector's error lands on its NEIGHBOURS' inputs, which is why no
+    per-onset metric can see it.
+
+    Pass `frame_times` (seconds, one per frame, ascending) whenever they are
+    available — see window_from_anchor for what it buys.
     """
+    ts = None if frame_times is None else np.asarray(frame_times, dtype=float)
     out = []
     for i, o in enumerate(onsets):
-        gap_prev = (o - onsets[i - 1]) / fps if i > 0 else None
-        gap_next = (onsets[i + 1] - o) / fps if i < len(onsets) - 1 else None
+        # Gaps in real time when timestamps are known, frames/fps otherwise.
+        if ts is None:
+            gap_prev = (o - onsets[i - 1]) / fps if i > 0 else None
+            gap_next = (onsets[i + 1] - o) / fps if i < len(onsets) - 1 else None
+        else:
+            gap_prev = float(ts[o] - ts[onsets[i - 1]]) if i > 0 else None
+            gap_next = float(ts[onsets[i + 1]] - ts[o]) \
+                if i < len(onsets) - 1 else None
         offsets = move_window(gap_prev, gap_next)
-        out.append({
-            key: int(np.clip(round(o + offsets[key] * fps), 0, n_frames - 1))
-            for key in WINDOWS
-        })
+        out.append(window_from_anchor(int(o), offsets, fps, n_frames, ts))
     return out

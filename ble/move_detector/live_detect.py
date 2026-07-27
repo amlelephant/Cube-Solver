@@ -59,24 +59,85 @@ if str(_BLE_DIR) not in sys.path:
 from dataset import ArrayStream                                # noqa: E402
 from model import build_model, score_stream                    # noqa: E402
 from decode import (peak_pick, onset_windows, match_onsets,    # noqa: E402
-                    format_metrics, MIN_SEP, TOLERANCE)
+                    format_metrics, align_sequences, MIN_SEP, TOLERANCE)
 from prepare_data import (per_frame_boxes, build_gray_stream,   # noqa: E402
                           crop_to_box, center_square)
-from train_move_classifier import FRAME_ORDER, predict         # noqa: E402
+from train_move_classifier import (FRAME_ORDER, predict_probs,  # noqa: E402
+                                   inference_crop_regime)
 
-# move_detector.pt   — final fit, all 9 frame-bearing sessions, 41 epochs,
-#                      threshold 0.50 (both carried from the --holdout
-#                      session run, which at that operating point measures
-#                      97.7% recall / 93.3% precision). The threshold is
-#                      tuned by F2, not F1: a missed move has to be invented
-#                      by the downstream solve decode, a spurious one only
-#                      deleted. See decode.sweep_threshold.
-# move_classifier_all20.pt — trained on all 20 sessions, 94.3% accuracy on 4
-#                      held-out sessions spanning both recording days. The
-#                      older move_classifier_wca.pt saw only the 20260720
-#                      sessions and scored 66.9% on 20260721 footage.
-DETECTOR_PATH  = "move_detector.pt"
-CLASSIFIER_PATH = "../move_classifier_all20.pt"
+# move_detector_all28.pt — 28 frame-bearing sessions (adds 20260723 and
+#                      20260724, neither of which the previous move_detector.pt
+#                      had ever seen), --holdout session with one name per
+#                      recording day (20260721, 20260722, 20260723, 20260724):
+#                      93.9% F1 / 95.8% recall aggregate, tuned threshold
+#                      0.25. Replaced move_detector.pt (a same-day "final fit"
+#                      on 12 sessions with no validation of its own) on
+#                      2026-07-24 after it scored only 89.8% F1 across all 16
+#                      sessions from 20260723/20260724 it had never seen.
+# move_classifier_all39_cropped.pt — all 39 sessions, ALL of them cropped
+#                      to the cube box before diffing (cache_crops.py run on
+#                      every session first). 94.6% on the same 5-session
+#                      cross-environment holdout used for all23/all27/all39.
+#                      This superseded move_classifier_all39.pt within the
+#                      same day: all39 trained on a MIX of cropped (the 23
+#                      recorded sessions) and full-frame (the 16 live
+#                      sessions from 20260723/20260724, cache_crops.py had
+#                      never been run on them) — but live_detect.py's
+#                      inference path ALWAYS crops, so every one of those 16
+#                      sessions trained on a different scale than inference
+#                      ever shows the model. Fixing that (not "more live
+#                      data", which was the story at the time) is most of
+#                      what actually closed the live-regime gap. Per-session
+#                      on that holdout, evaluated fairly (cropped) for all four:
+#                        20260720   20260721   20260722   20260723   20260724
+#           all23        97.2%      93.2%      90.4%      90.8%      84.1%
+#           all27        95.8%      88.4%      83.2%      81.6%      73.0%
+#           all39        95.8%      89.7%      91.0%      93.9%      78.6%
+#           all39_cropped 97.2%     94.5%      94.0%      93.9%      94.4%
+#                      Note all23 alone — same weights, no retraining —
+#                      scores 90.6% aggregate here once evaluated on cropped
+#                      images; the 61.5%/7-9% numbers once reported for it
+#                      were mostly a broken eval, not a broken model. See
+#                      ../move_detector/README.md "Correction, same day"
+#                      for the full story and the end-to-end (not just
+#                      isolated-classifier) numbers.
+# move_classifier_all39_jitter.pt — the SAME 39 sessions and the SAME five
+#                      named holdout sessions as all39_cropped, retrained
+#                      with --anchor-jitter so the augmentation is the only
+#                      variable. 94.7% on the canonical holdout, i.e. no
+#                      change in-distribution (all39_cropped: 94.6%) — the
+#                      gain is entirely in the live regime, which is the
+#                      point.
+#
+#                      Measured on the 10 saved live takes NEITHER model has
+#                      seen, scoring predictions by timestamp match
+#                      (metric_audit.py; the detector is untouched, so both
+#                      models are scored on an identical set of found moves):
+#
+#                                          all39_cropped   all39_jitter
+#                        classifier of found    81.5%          85.8%
+#                        free solves only       78.6%          83.2%
+#                        end-to-end             69.5%          73.2%
+#
+#                      McNemar on the paired moves: 54 fixed, 29 broken,
+#                      p=0.008. It does NOT help on the two takes whose
+#                      detector did worst (134516_solve at 69% recall,
+#                      100142_solve with 14 phantoms) — a bad onset stream
+#                      is a different failure and jitter does not touch it.
+#
+#                      WHY jitter: window_audit.py showed classifier accuracy
+#                      falls with how many of the 5 window slots differ from
+#                      the trainer's own choice, while the same moves on the
+#                      canonical window stay flat — and inference CANNOT
+#                      reproduce that window, because its anchor is a frame
+#                      index while training used the sub-frame BLE timestamp.
+#                      Fixing the frame selection at inference was tried
+#                      first and measured p=0.40. So the model is trained on
+#                      the shifted windows instead. Live anchor offsets are
+#                      ~2x wider than recorded ones (52% vs 72% exact), which
+#                      is why this shows up live and not in replay.
+DETECTOR_PATH  = "move_detector_all28.pt"
+CLASSIFIER_PATH = "../move_classifier_all39_jitter.pt"
 JPEG_QUALITY   = 85
 
 
@@ -84,27 +145,105 @@ JPEG_QUALITY   = 85
 # Analysis — shared by live capture and offline replay
 # ---------------------------------------------------------------------------
 
+# Warn once per (classifier, regime) rather than once per session: the
+# replay loops call analyse() dozens of times and a repeated banner trains
+# you to skip it, which is how the crop mismatch survived a whole day of
+# training logs that were technically reporting it.
+_CROP_WARNED: set = set()
+
+
+def _warn_crop_mismatch(classifier: str, cropped: bool) -> None:
+    """
+    Loudly flag a classifier being fed an input scale it never trained on.
+
+    The classifier checkpoint records `crop_regime` (train_move_classifier.py).
+    This is the inference-side half of that contract: if a cube-cropped model
+    is about to be handed centered-square frames — because ultralytics or
+    detect_full_cube.pt is missing, or because the cube was never detected in
+    this take — the resulting accuracy describes the mismatch, not the model.
+    """
+    regime = inference_crop_regime(classifier)
+    key = (str(classifier), regime, cropped)
+    if key in _CROP_WARNED:
+        return
+    _CROP_WARNED.add(key)
+
+    if regime is None:
+        if not cropped:
+            print(f"  WARNING: no cube crop this run, and {Path(classifier).name} "
+                  f"predates crop\n           provenance (retrain to record "
+                  f"it). If it was trained cropped — the\n           deployed "
+                  f"ones were — these predictions are on the wrong scale.")
+        return
+    if regime == "cropped" and not cropped:
+        print(f"\n  WARNING: {Path(classifier).name} was trained on CUBE CROPS "
+              f"but this run has no\n           crop (centered square "
+              f"fallback). Expect a large, misleading accuracy\n           "
+              f"drop — an unchanged checkpoint measured 61.5% vs 90.6% purely "
+              f"on this.\n           Install ultralytics + "
+              f"cv/detection/detect_full_cube.pt.\n")
+    elif regime in ("full-frame", "mixed") and cropped:
+        print(f"\n  WARNING: {Path(classifier).name} was trained "
+              f"{regime.upper()} but is being fed cube\n           crops. "
+              f"Retrain it after `python cache_crops.py --sessions "
+              f"training_data/solve_*/`.\n")
+
+
 def analyse(load_color, n_frames: int, fps: float, detector, det_model,
             device, threshold: float, min_sep: int, classifier: str,
-            verbose: bool = True) -> dict:
+            verbose: bool = True, frame_times=None,
+            peak_threshold: float | None = None) -> dict:
     """
     Full pipeline over a buffered stream.
 
     `load_color` is i -> BGR frame. Everything downstream runs through the
     same helpers prepare_data.py uses offline, so what the detector sees
     here is byte-identical in construction to what it trained on.
+
+    `frame_times` is the capture timestamp of each frame, in seconds and
+    ascending — index-aligned with what `load_color` returns, so a resampled
+    stream must pass the RESAMPLED timeline. It lets the classifier windows
+    be carved the way postprocess_session.py carved the training ones
+    (nearest frame in time) instead of by index arithmetic against a global
+    mean fps. Measured effect on accuracy: +0.3 points, NOT significant —
+    see decode.window_from_anchor for why the real residual is the anchor
+    rather than the frame selection. Omitting it degrades to the legacy
+    behaviour.
+
+    `peak_threshold`, when given (and lower than `threshold`), is used for
+    peak-picking INSTEAD of `threshold` — it widens the onset list to
+    include sub-threshold peaks the model saw but the deployed operating
+    point discards (see decode.py's miss-bucket diagnostic: "subthreshold"
+    misses have a real peak, just below the F-beta-tuned cutoff). Every
+    extra onset still gets classified normally; `threshold` is still
+    reported on each move's `score` field so a downstream cost model (see
+    reconstruct.score_del_costs's `candidate_threshold` ramp) can price a
+    weak candidate near-free to delete instead of at the flat onset cost —
+    this is PATH_TO_VERIFICATION.md's D1 lever, and it only ever ADDS
+    onsets relative to the `threshold`-only call. None (the default)
+    reproduces the exact prior behaviour.
     """
     t0 = time.time()
+    pick_threshold = threshold if peak_threshold is None \
+        else min(peak_threshold, threshold)
 
+    cropped = detector is not None
     if detector is not None:
         boxes, n_det = per_frame_boxes(detector, load_color, n_frames)
-        crop_note = f"{n_det} cube detections -> per-frame boxes"
+        # n_det == 0 means per_frame_boxes already fell back to a centered
+        # square for the WHOLE stream. That used to print as "0 cube
+        # detections -> per-frame boxes", which reads like a successful crop.
+        cropped = n_det > 0
+        crop_note = (f"{n_det} cube detections -> per-frame boxes" if cropped
+                     else "cube NEVER detected -> centered square crop "
+                          "(both models trained on cube crops!)")
     else:
         probe = load_color(0)
         boxes = np.tile(center_square(probe.shape), (n_frames, 1)).astype(np.int32)
         crop_note = "no detector -> centered square crop"
     if verbose:
         print(f"  crop:   {crop_note}  ({time.time()-t0:.1f}s)")
+        _warn_crop_mismatch(classifier, cropped)
 
     gray = build_gray_stream(
         lambda i: (lambda f: None if f is None else
@@ -114,12 +253,17 @@ def analyse(load_color, n_frames: int, fps: float, detector, det_model,
 
     stream = ArrayStream(gray, name="live", fps=fps)
     scores = score_stream(det_model, stream, device)
-    onsets = peak_pick(scores, threshold=threshold, min_sep=min_sep)
+    onsets = peak_pick(scores, threshold=pick_threshold, min_sep=min_sep)
     if verbose:
-        print(f"  detect: {len(onsets)} onsets at threshold {threshold} "
+        tag = (f"{pick_threshold} (candidate; operating point {threshold})"
+               if pick_threshold != threshold else str(threshold))
+        print(f"  detect: {len(onsets)} onsets at threshold {tag} "
               f"({time.time()-t0:.1f}s)")
 
-    windows = onset_windows(onsets, fps, n_frames)
+    windows = onset_windows(onsets, fps, n_frames, frame_times)
+    if verbose and frame_times is None:
+        print(f"  note:   no frame timestamps — classifier windows fall back "
+              f"to index arithmetic")
 
     moves = []
     for o, w in zip(onsets, windows):
@@ -134,15 +278,20 @@ def analyse(load_color, n_frames: int, fps: float, detector, det_model,
             frames.append(crop_to_box(f, box) if f is not None else None)
         if any(f is None for f in frames):
             continue
-        _, name, conf = predict(frames, classifier)
-        moves.append({"frame": int(o), "time": float(o / fps), "move": name,
-                      "conf": float(conf), "score": float(scores[o]),
+        probs, class_names = predict_probs(frames, classifier)
+        cls = int(np.argmax(probs))
+        moves.append({"frame": int(o), "time": float(o / fps),
+                      "move": class_names[cls], "conf": float(probs[cls]),
+                      "probs": [float(p) for p in probs],
+                      "score": float(scores[o]),
                       "window": idxs, "box": box.tolist()})
 
     if verbose:
         print(f"  classify: {len(moves)} moves ({time.time()-t0:.1f}s total)")
 
     return {"scores": scores, "onsets": onsets, "moves": moves, "boxes": boxes,
+            "class_names": class_names if moves else None,
+            "cropped": cropped,
             "fps": fps, "n_frames": n_frames}
 
 
@@ -280,55 +429,17 @@ def format_scramble(scramble: list[str], per_row: int = 8) -> list[str]:
     return lines
 
 
-def align_sequences(truth: list[str], pred: list[str]) -> list[tuple]:
+def report_scramble(truth: list[str], moves: list[dict],
+                    truth_label: str = "prescribed",
+                    title: str = "SCRAMBLE ACCURACY") -> dict:
     """
-    Needleman-Wunsch alignment of the predicted sequence against the
-    prescribed one. Returns [(op, truth_move, pred_move), ...] where op is
-    one of "ok", "sub", "miss", "phantom".
+    Print the alignment and the per-stage accuracy breakdown.
 
-    Alignment rather than index-by-index comparison, because a single
-    missed move shifts every later index — position i of the prediction
-    stops corresponding to position i of the truth. Compared positionally,
-    one dropped move at the start reads as ~25 errors instead of 1, and the
-    whole measurement becomes noise.
-
-    The three non-"ok" ops map onto the three failure modes:
-      miss     detector never fired          -> recall problem
-      phantom  detector fired spuriously     -> precision problem
-      sub      detected, named wrong         -> classifier problem
+    `truth_label` names where the ground truth came from, because that is
+    not always the printed scramble: with a smart cube attached it is the
+    move list the cube actually felt, which is a different — and stronger —
+    claim about what these numbers mean.
     """
-    n, m = len(truth), len(pred)
-    dp = np.zeros((n + 1, m + 1), dtype=np.int32)
-    dp[:, 0] = np.arange(n + 1)
-    dp[0, :] = np.arange(m + 1)
-
-    for i in range(1, n + 1):
-        for j in range(1, m + 1):
-            dp[i, j] = min(
-                dp[i - 1, j - 1] + (truth[i - 1] != pred[j - 1]),
-                dp[i - 1, j] + 1,      # truth move absent from pred = miss
-                dp[i, j - 1] + 1,      # extra pred move = phantom
-            )
-
-    ops: list[tuple] = []
-    i, j = n, m
-    while i > 0 or j > 0:
-        if (i > 0 and j > 0 and
-                dp[i, j] == dp[i - 1, j - 1] + (truth[i - 1] != pred[j - 1])):
-            same = truth[i - 1] == pred[j - 1]
-            ops.append(("ok" if same else "sub", truth[i - 1], pred[j - 1]))
-            i, j = i - 1, j - 1
-        elif i > 0 and dp[i, j] == dp[i - 1, j] + 1:
-            ops.append(("miss", truth[i - 1], None))
-            i -= 1
-        else:
-            ops.append(("phantom", None, pred[j - 1]))
-            j -= 1
-    return ops[::-1]
-
-
-def report_scramble(truth: list[str], moves: list[dict]) -> dict:
-    """Print the alignment and the per-stage accuracy breakdown."""
     pred = [m["move"] for m in moves]
     ops  = align_sequences(truth, pred)
 
@@ -338,7 +449,7 @@ def report_scramble(truth: list[str], moves: list[dict]) -> dict:
     detected = counts["ok"] + counts["sub"]
 
     print(f"\n{'='*66}")
-    print(f"  SCRAMBLE ACCURACY - {n_truth} prescribed moves, "
+    print(f"  {title} - {n_truth} {truth_label} moves, "
           f"{len(pred)} predicted")
     print(f"{'='*66}\n")
 
@@ -357,7 +468,7 @@ def report_scramble(truth: list[str], moves: list[dict]) -> dict:
 
     print(f"\n  {'-'*44}")
     print(f"  correct          {counts['ok']:>4}   "
-          f"({counts['ok']/n_truth*100:5.1f}% of prescribed)")
+          f"({counts['ok']/n_truth*100:5.1f}% of {truth_label})")
     print(f"  misclassified    {counts['sub']:>4}   X  detected, named wrong")
     print(f"  missed           {counts['miss']:>4}   -  detector never fired")
     print(f"  phantom          {counts['phantom']:>4}   +  detector fired "
@@ -399,7 +510,8 @@ def report_scramble(truth: list[str], moves: list[dict]) -> dict:
 # ---------------------------------------------------------------------------
 
 def capture(camera: int, preview_every: int = 2,
-            overlay: list[str] | None = None) -> tuple[list, np.ndarray]:
+            overlay: list[str] | None = None,
+            status_fn=None) -> tuple[list, np.ndarray]:
     """
     Buffer JPEG-encoded frames from the webcam. Returns (frames, timestamps).
 
@@ -417,6 +529,12 @@ def capture(camera: int, preview_every: int = 2,
 
     Timestamps come back per frame rather than as a single average, so
     analysis can detect and correct for a rate that drifted mid-capture.
+
+    `status_fn` is an optional zero-arg callable returning one short line to
+    draw under the REC indicator. It exists so a BLE ground-truth logger can
+    show its move count live: a cube that silently stopped reporting and a
+    cube that is reporting fine look identical until the take is over and
+    the truth is empty, which is an expensive way to find out.
     """
     import queue
     import threading
@@ -488,6 +606,10 @@ def capture(camera: int, preview_every: int = 2,
                     cv2.putText(disp, "LOW FPS - moves will be missed",
                                 (48, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                                 (0, 165, 255), 1, cv2.LINE_AA)
+                if status_fn is not None:
+                    cv2.putText(disp, status_fn(), (48, 84 if warn else 64),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                (120, 255, 120), 1, cv2.LINE_AA)
             else:
                 cv2.putText(disp, "SPACE to record" if not buf
                             else f"SPACE to re-record ({len(buf)}f held)",
@@ -737,7 +859,8 @@ def replay(session_dir: Path, detector, det_model, device, args):
         return cache[i]
 
     res = analyse(load_color, n, fps, detector, det_model, device,
-                  args.threshold, args.min_sep, args.classifier)
+                  args.threshold, args.min_sep, args.classifier,
+                  frame_times=ts)
 
     # Onset detection quality
     m = match_onsets(res["onsets"], gt_onset, res["scores"], args.tolerance)
@@ -913,8 +1036,12 @@ def main(args):
 
     print()
     load_color = lambda i: cv2.imdecode(buf[order[i]], cv2.IMREAD_COLOR)
+    # `order` may repeat or skip captured frames (resample_to_30fps), so the
+    # timeline handed to analyse has to be indexed the same way load_color is
+    # — stamps[order], not stamps.
     res = analyse(load_color, len(order), fps, detector, det_model, device,
-                  args.threshold, args.min_sep, args.classifier)
+                  args.threshold, args.min_sep, args.classifier,
+                  frame_times=stamps[order])
     print_sequence(res["moves"], fps)
 
     if scramble:

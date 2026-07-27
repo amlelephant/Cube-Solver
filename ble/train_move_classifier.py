@@ -39,8 +39,23 @@ Cropping: if a session folder contains crops.json (produced by
 cache_crops.py using the cv/detection cube detector), every frame of a
 move is cropped to that move's shared cube box before the diff stack is
 built — the cube fills the input instead of ~30% of it, and background
-pixels stop diluting the signal. Sessions without crops.json train on
-full frames.
+pixels stop diluting the signal.
+
+Sessions WITHOUT crops.json would train on full frames, and that is now a
+hard error rather than a line in the log header. Every inference path in
+the repo (live_detect.analyse, live_test.py, move_detector/prepare_data.py)
+always crops, so a mixed regime trains one input scale and is scored on
+another. It is not a graceful degradation: on 2026-07-24 an unchanged
+checkpoint measured 61.5% vs 90.6% aggregate purely on whether the
+EVALUATION sessions had been cropped, which for most of a day looked like
+evidence about training data volume. So:
+
+  * training and --eval both refuse a mixed regime (--allow-uncropped
+    overrides, and says the resulting number is not comparable);
+  * the regime is recorded in the checkpoint as `crop_regime`, and
+    live_detect checks it against whether a cube box was actually found;
+  * `python cache_crops.py --sessions training_data/solve_*/ --check` is
+    the preflight — run it before a retrain, and before quoting a number.
 
 Usage:
   # Train on one or more session folders:
@@ -80,10 +95,45 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 
+try:
+    # The margin the LIVE crop uses. Only needed to notice a stale
+    # crops.json cached under a different one; the trainer still works
+    # without cv/detection present, it just cannot make that check.
+    from crop_utils import CROP_MARGIN
+except Exception:                                       # pragma: no cover
+    CROP_MARGIN = None
+
+# Window geometry, imported rather than restated. --anchor-jitter has to
+# rebuild windows exactly the way inference rebuilds them, and a second copy
+# of that arithmetic here is precisely how the two would drift apart.
+_MD_DIR = Path(__file__).resolve().parent / "move_detector"
+if str(_MD_DIR) not in sys.path:
+    sys.path.insert(0, str(_MD_DIR))
+try:
+    from decode import window_from_anchor                    # noqa: E402
+    from postprocess_session import move_window, WINDOWS      # noqa: E402
+except Exception:                                       # pragma: no cover
+    window_from_anchor = None
+
 NUM_CLASSES = 12
 IMG_SIZE    = 224    # ResNet-18 standard input size
 MODEL_PATH  = "move_classifier.pt"
 NUM_DIFFS   = 4      # ordered diffs per sample (4 = full window, 1 = legacy)
+
+# Anchor-jitter augmentation (--anchor-jitter). See MoveDiffDataset for what
+# it does; this is the distribution it samples the shift from, in frames,
+# measured on saved LIVE takes rather than on recorded sessions:
+#
+#   recorded (record_training.py)    72% exact, |mean| 0.29
+#   live     (verify_solve.py --ble) 52% exact, |mean| 0.56
+#
+# The live spread is what the deployed model actually meets and it is nearly
+# twice as wide, so that is what training should be asked to tolerate — a
+# model hardened against the narrower recorded distribution is being
+# prepared for a problem it does not have. Values below are the live
+# histogram (metric_audit.py, 577 matched moves over 10 saved takes,
+# 2026-07-26): -2:28  -1:99  0:297  +1:138  +2:15.
+ANCHOR_JITTER_PMF = {-2: 0.05, -1: 0.17, 0: 0.51, 1: 0.24, 2: 0.03}
 
 # Temporal order of the postprocess_session.py window snapshots
 FRAME_ORDER = ["before", "mid_00", "mid_01", "mid_02", "after"]
@@ -152,7 +202,9 @@ class MoveDiffDataset(Dataset):
     """
 
     def __init__(self, session_dirs: list[Path], augment: bool = True,
-                 num_diffs: int = NUM_DIFFS, label_mode: str = "wca"):
+                 num_diffs: int = NUM_DIFFS, label_mode: str = "wca",
+                 anchor_jitter: bool = False,
+                 jitter_pmf: dict | None = None):
         self.samples     = []   # [(frame_paths, label, crop_box), ...]
         # Session name per sample, index-aligned with self.samples. Kept
         # parallel rather than as a 4th tuple field so existing
@@ -162,9 +214,32 @@ class MoveDiffDataset(Dataset):
         self.num_diffs   = num_diffs
         self.label_mode  = label_mode
         self.class_names, self.flip_map = LABEL_MODES[label_mode]
-        self.cropped_sessions   = 0
-        self.uncropped_sessions = 0
+        # Crop provenance, tracked at BOTH granularities on purpose. The
+        # session count is what the training header used to report; the
+        # per-SAMPLE count is what actually matters, because a session can
+        # own a crops.json that predates its moves_labeled.jsonl and be
+        # missing boxes for the moves added since — those moves then train
+        # full-frame inside a session the header calls "cached".
+        self.session_crop: dict[str, str] = {}   # name -> cropped/full-frame
+        self.uncropped_samples  = 0
+        self.crop_margins: set[float] = set()
+        # Anchor jitter. Parallel to self.samples like sample_session, so the
+        # (paths, label, box) unpacking used all over this file stays valid.
+        # Entry is {shift_in_frames: [5 paths]} or None when the session has
+        # no raw frames/ to rebuild a shifted window from.
+        self.anchor_jitter = anchor_jitter
+        self.jitter_pmf    = jitter_pmf or ANCHOR_JITTER_PMF
+        self.sample_windows: list[dict | None] = []
+        self.jitterable_sessions: set[str] = set()
         self._load_sessions(session_dirs)
+
+    @property
+    def cropped_sessions(self) -> int:
+        return sum(v == "cropped" for v in self.session_crop.values())
+
+    @property
+    def uncropped_sessions(self) -> int:
+        return sum(v != "cropped" for v in self.session_crop.values())
 
     def _label_of(self, m: dict) -> int | None:
         if self.label_mode == "ble":
@@ -176,6 +251,58 @@ class MoveDiffDataset(Dataset):
         if self.num_diffs == 1:
             return ["before", "mid_01"]
         return FRAME_ORDER
+
+    def _jitter_source(self, session_dir: Path):
+        """
+        (frame_paths, frame_ts, fps) for a session whose raw stream survives,
+        else None. Needed to rebuild a window around a SHIFTED anchor —
+        labeled/ only holds the 5 frames of the unshifted one.
+        """
+        if not self.anchor_jitter or window_from_anchor is None:
+            return None
+        fidx, fdir = session_dir / "frames.jsonl", session_dir / "frames"
+        if not (fidx.exists() and fdir.is_dir()):
+            return None
+        recs = [json.loads(l) for l in open(fidx) if l.strip()]
+        paths = [fdir / r["file"] for r in recs]
+        keep = [i for i, p in enumerate(paths) if p.exists()]
+        if len(keep) < 2:
+            return None
+        paths = [paths[i] for i in keep]
+        ts = np.array([recs[i]["ts"] for i in keep], dtype=np.float64)
+        span = ts[-1] - ts[0]
+        return paths, ts, (len(ts) / span if span > 0 else 30.0)
+
+    def _jitter_windows(self, m: dict, prev_t, next_t, src) -> dict | None:
+        """
+        {shift: [5 paths]} for every shift in the jitter PMF, built the way
+        inference builds a window: anchor on a FRAME index, then nearest
+        frame in time to anchor_ts + offset. Shift 0 is therefore not
+        identical to the trainer's own window — that one is anchored on the
+        sub-frame BLE timestamp, which inference never has. Including 0 here
+        on the inference footing is deliberate: the point is to train on the
+        windows the pipeline will actually produce.
+        """
+        paths, ts, fps = src
+        t = m.get("timestamp")
+        if t is None:
+            return None
+        anchor = int(np.searchsorted(ts, t))
+        if anchor > 0 and (anchor >= len(ts) or
+                           abs(ts[anchor - 1] - t) < abs(ts[anchor] - t)):
+            anchor -= 1
+        if not (0 <= anchor < len(ts)):
+            return None
+        offsets = move_window(None if prev_t is None else t - prev_t,
+                              None if next_t is None else next_t - t)
+        out = {}
+        for shift in self.jitter_pmf:
+            a = int(np.clip(anchor + shift, 0, len(ts) - 1))
+            w = window_from_anchor(a, offsets, fps, len(ts), ts)
+            # _window_keys(), not WINDOWS, so --diffs 1 gets its 2-frame
+            # window rather than all five.
+            out[shift] = [paths[w[k]] for k in self._window_keys()]
+        return out
 
     def _load_sessions(self, session_dirs: list[Path]):
         skipped = 0
@@ -189,38 +316,60 @@ class MoveDiffDataset(Dataset):
             crop_boxes = {}
             crops_file = session_dir / "crops.json"
             if crops_file.exists():
-                crop_boxes = json.loads(crops_file.read_text())["boxes"]
-                self.cropped_sessions += 1
+                cached = json.loads(crops_file.read_text())
+                crop_boxes = cached["boxes"]
+                self.crop_margins.add(float(cached.get("margin", -1)))
+                self.session_crop[session_dir.name] = "cropped"
             else:
-                self.uncropped_sessions += 1
+                self.session_crop[session_dir.name] = "full-frame"
 
-            with open(labeled) as f:
-                for line in f:
-                    m = json.loads(line.strip())
+            # Read the whole move list up front: a jittered window needs the
+            # neighbouring moves' timestamps to reproduce move_window()'s
+            # squeeze, which a line-at-a-time loop cannot see.
+            moves = [json.loads(l) for l in open(labeled) if l.strip()]
+            jsrc = self._jitter_source(session_dir)
+            if jsrc is not None:
+                self.jitterable_sessions.add(session_dir.name)
 
-                    label = self._label_of(m)
-                    if label is None:
-                        skipped += 1
-                        continue
+            for mi, m in enumerate(moves):
+                label = self._label_of(m)
+                if label is None:
+                    skipped += 1
+                    continue
 
-                    frames = m.get("frames", {})
-                    paths  = []
-                    for key in self._window_keys():
-                        rel = frames.get(key)
-                        p   = session_dir / rel if rel else None
-                        if p is None or not p.exists():
-                            paths = None
-                            break
-                        paths.append(p)
+                frames = m.get("frames", {})
+                paths  = []
+                for key in self._window_keys():
+                    rel = frames.get(key)
+                    p   = session_dir / rel if rel else None
+                    if p is None or not p.exists():
+                        paths = None
+                        break
+                    paths.append(p)
 
-                    if paths is None:
-                        skipped += 1
-                        continue
+                if paths is None:
+                    skipped += 1
+                    continue
 
-                    box = crop_boxes.get(f"move_{m['move_num']:04d}")
-                    self.samples.append((paths, label,
-                                         tuple(box) if box else None))
-                    self.sample_session.append(session_dir.name)
+                box = crop_boxes.get(f"move_{m['move_num']:04d}")
+                if box is None:
+                    self.uncropped_samples += 1
+                    # A cached session missing this move's box is worse
+                    # than an uncached one: it hides inside a "cropped"
+                    # header line. Demote the whole session so the
+                    # summary cannot call it clean.
+                    self.session_crop[session_dir.name] = "partial"
+                self.samples.append((paths, label,
+                                     tuple(box) if box else None))
+                self.sample_session.append(session_dir.name)
+                self.sample_windows.append(
+                    self._jitter_windows(
+                        m,
+                        moves[mi - 1]["timestamp"] if mi > 0 else None,
+                        moves[mi + 1]["timestamp"]
+                        if mi < len(moves) - 1 else None,
+                        jsrc)
+                    if jsrc is not None else None)
 
         if skipped:
             print(f"  Skipped {skipped} moves (missing frames or invalid label)")
@@ -230,6 +379,24 @@ class MoveDiffDataset(Dataset):
 
     def __getitem__(self, idx):
         paths, label, box = self.samples[idx]
+
+        # Anchor jitter, train split only. The window the pipeline hands the
+        # classifier is anchored on a detected onset FRAME, which sits within
+        # a frame or two of where the trainer put it — and window_audit.py
+        # measured the cost of that on 2456 moves: accuracy falls with the
+        # number of window slots that differ (98.9/97.8/95.8/95.8/91.9/91.9%
+        # for 0..5 differing) while the same moves on the canonical window
+        # stay flat. Selecting frames more cleverly at inference does not fix
+        # it — that was tried on 2026-07-26 and measured p=0.40. So instead
+        # show the model the shifted windows during training and let it stop
+        # depending on the exact one.
+        if self.augment and self.anchor_jitter:
+            w = self.sample_windows[idx]
+            if w:
+                shifts = list(w)
+                pick = random.choices(
+                    shifts, weights=[self.jitter_pmf[s] for s in shifts])[0]
+                paths = w[pick]
 
         imgs = [cv2.imread(str(p)) for p in paths]
         if any(i is None for i in imgs):
@@ -311,10 +478,19 @@ class MoveDiffDataset(Dataset):
 # ---------------------------------------------------------------------------
 
 def split_indices(ds: MoveDiffDataset, holdout: str = "session",
-                  val_sessions: int | None = None,
-                  seed: int = 42) -> tuple[list[int], list[int], list[str]]:
+                  val_sessions: int | None = None, seed: int = 42,
+                  val_names: list[str] | None = None
+                  ) -> tuple[list[int], list[int], list[str]]:
     """
     Split sample indices into (train_idx, val_idx, held_out_session_names).
+
+    `val_names` names the validation sessions explicitly, overriding the
+    random pick — the same knob train.py's detector already has, and for
+    the same reason. Once the sessions span more than one recording
+    environment a random holdout can land entirely inside one of them, and
+    the result then measures within-environment fit while looking exactly
+    like a cross-environment number. Name one session per environment and
+    the split answers the question actually being asked.
 
     holdout="session" (default) — hold out WHOLE sessions. This is the
         honest measure of whether the model generalizes to a new recording.
@@ -351,6 +527,20 @@ def split_indices(ds: MoveDiffDataset, holdout: str = "session",
     if len(sessions) < 2:
         sys.exit(f"Session holdout needs >= 2 sessions, found {len(sessions)}. "
                  f"Record more solves, or use --holdout random (leaky).")
+
+    if val_names:
+        wanted, known = set(val_names), set(sessions)
+        missing = wanted - known
+        if missing:
+            sys.exit(f"--val-session-names not found among the loaded "
+                     f"sessions: {sorted(missing)}\nLoaded: {sorted(known)}")
+        if len(wanted) >= len(sessions):
+            sys.exit("Every session was named as validation; nothing left "
+                     "to train on.")
+        train_idx, val_idx = [], []
+        for i, sess in enumerate(ds.sample_session):
+            (val_idx if sess in wanted else train_idx).append(i)
+        return train_idx, val_idx, sorted(wanted)
 
     n_val = val_sessions if val_sessions is not None \
         else max(1, round(len(sessions) * 0.2))
@@ -391,6 +581,76 @@ def report_split(ds: MoveDiffDataset, train_idx: list[int], val_idx: list[int],
               f"sessions can't be stratified —")
         print(f"        raise --val-sessions or record solves covering these "
               f"faces.")
+
+
+# ---------------------------------------------------------------------------
+# Crop provenance — the one thing this file used to get silently wrong
+# ---------------------------------------------------------------------------
+#
+# Every inference path in the repo (live_detect.analyse, live_test.py,
+# move_detector/prepare_data.py) ALWAYS crops to the cube box. Training
+# crops only where a crops.json exists. When those two disagree the model
+# is scored on a scale it never trained to read, and the resulting accuracy
+# number is not wrong-by-a-little — on 2026-07-24 an unchanged checkpoint
+# went 61.5% -> 90.6% aggregate purely from fixing the EVAL side of this.
+#
+# So the mix is no longer a line in a log header that nobody reads: it is
+# recorded in the checkpoint, re-checked at eval time against what the
+# checkpoint says, and refused by default when it is not uniform.
+
+def crop_regime(ds: "MoveDiffDataset") -> str:
+    """'cropped' | 'full-frame' | 'mixed' — what the model actually sees."""
+    if ds.uncropped_samples == 0:
+        return "cropped"
+    if ds.uncropped_samples == len(ds.samples):
+        return "full-frame"
+    return "mixed"
+
+
+def report_crops(ds: "MoveDiffDataset", allow_mixed: bool = False,
+                 context: str = "training") -> str:
+    """
+    Print the crop breakdown and stop on a mixed regime unless allowed.
+
+    Returns the regime string, which the caller records in / checks against
+    the checkpoint.
+    """
+    regime = crop_regime(ds)
+    n = len(ds.samples)
+    print(f"  Crops:     {ds.cropped_sessions} session(s) cached, "
+          f"{ds.uncropped_sessions} without — regime: {regime.upper()}")
+    if len(ds.crop_margins) > 1:
+        print(f"  WARNING:   crops.json files disagree on margin "
+              f"{sorted(ds.crop_margins)} — some were cached with a "
+              f"different\n             margin than the others. "
+              f"Re-run cache_crops.py --force.")
+    elif ds.crop_margins and CROP_MARGIN is not None \
+            and abs(next(iter(ds.crop_margins)) - CROP_MARGIN) > 1e-9:
+        print(f"  WARNING:   crops.json cached at margin "
+              f"{next(iter(ds.crop_margins))}, but crop_utils.CROP_MARGIN is "
+              f"now {CROP_MARGIN}.\n             Inference crops at the "
+              f"CURRENT margin — re-run cache_crops.py --force.")
+
+    if regime == "cropped":
+        return regime
+
+    bad = sorted(name for name, v in ds.session_crop.items() if v != "cropped")
+    print(f"\n  {ds.uncropped_samples}/{n} sample(s) in "
+          f"{len(bad)} session(s) have NO cube crop box:")
+    for name in bad[:12]:
+        print(f"    {name}  ({ds.session_crop[name]})")
+    if len(bad) > 12:
+        print(f"    ... and {len(bad) - 12} more")
+    print(f"\n  Every inference path in this repo crops to the cube box, so "
+          f"these samples\n  would be {context} at a scale the model is "
+          f"never shown live. Fix it with:\n\n"
+          f"      python cache_crops.py --sessions training_data/solve_*/\n")
+    if not allow_mixed:
+        sys.exit("Refusing to proceed on a mixed crop regime "
+                 "(--allow-uncropped to override).")
+    print(f"  --allow-uncropped given; proceeding anyway. Any accuracy "
+          f"number from this\n  run is not comparable to a cropped one.\n")
+    return regime
 
 
 def build_diff_stack(frames_bgr: list[np.ndarray]) -> np.ndarray:
@@ -486,14 +746,33 @@ def train(args):
 
     # Build dataset
     full_ds = MoveDiffDataset(session_dirs, augment=True, num_diffs=args.diffs,
-                              label_mode=args.labels)
+                              label_mode=args.labels,
+                              anchor_jitter=args.anchor_jitter)
     if len(full_ds) == 0:
         sys.exit("No valid samples found. Run postprocess_session.py first.")
 
+    if args.anchor_jitter:
+        if window_from_anchor is None:
+            sys.exit("--anchor-jitter needs move_detector/decode.py "
+                     "importable; it could not be loaded.")
+        n_j = sum(w is not None for w in full_ds.sample_windows)
+        pmf = "  ".join(f"{s:+d}:{p:.0%}"
+                        for s, p in sorted(full_ds.jitter_pmf.items()))
+        print(f"\n  Anchor jitter: ON — {n_j}/{len(full_ds)} sample(s) in "
+              f"{len(full_ds.jitterable_sessions)} session(s) can be shifted")
+        print(f"                 shift PMF (frames): {pmf}")
+        if n_j < len(full_ds):
+            stuck = sorted(set(full_ds.sample_session)
+                           - full_ds.jitterable_sessions)
+            print(f"                 {len(full_ds) - n_j} sample(s) in "
+                  f"{len(stuck)} session(s) keep the fixed window — no raw "
+                  f"frames/ to\n                 rebuild a shifted one "
+                  f"from: {', '.join(stuck[:4])}"
+                  f"{' ...' if len(stuck) > 4 else ''}")
+
     class_names = full_ds.class_names
-    print(f"  Crops:     {full_ds.cropped_sessions} session(s) cached, "
-          f"{full_ds.uncropped_sessions} full-frame"
-          + ("  ← run cache_crops.py" if full_ds.uncropped_sessions else ""))
+    regime = report_crops(full_ds, allow_mixed=args.allow_uncropped,
+                          context="trained")
 
     # Class distribution report
     counts = full_ds.class_counts()
@@ -512,7 +791,8 @@ def train(args):
     # Train / val split — whole sessions held out by default (see
     # split_indices docstring for why a per-move split overstates accuracy)
     train_idx, val_idx, held_out = split_indices(
-        full_ds, holdout=args.holdout, val_sessions=args.val_sessions)
+        full_ds, holdout=args.holdout, val_sessions=args.val_sessions,
+        val_names=args.val_session_names)
     report_split(full_ds, train_idx, val_idx, held_out, class_names)
 
     from torch.utils.data import Subset
@@ -617,6 +897,19 @@ def train(args):
                 "dropout":   args.dropout,
                 "holdout":   args.holdout,
                 "val_session_names": held_out,
+                # Crop provenance travels WITH the weights. Without it
+                # nothing downstream can tell whether feeding this model an
+                # uncropped frame is a bug or the intended input, and that
+                # ambiguity cost a day of misdiagnosis on 2026-07-24.
+                "crop_regime": regime,
+                "crop_margin": (next(iter(full_ds.crop_margins))
+                                if len(full_ds.crop_margins) == 1 else None),
+                "session_crop": dict(full_ds.session_crop),
+                # Same reasoning as crop_regime: the input distribution a
+                # checkpoint was trained on has to travel with the weights,
+                # or the next comparison cannot tell two checkpoints apart.
+                "anchor_jitter": (dict(full_ds.jitter_pmf)
+                                  if args.anchor_jitter else None),
             }, output_path)
 
         # Early stopping — val has plateaued, further epochs only overfit
@@ -664,6 +957,50 @@ def _per_class_eval(model: nn.Module, loader: DataLoader,
         print(f"  {class_names[cls]:<14} {c:>8} {n:>7}  {acc:>5.1f}%  {bar}")
 
 
+def _check_eval_crops(ds: MoveDiffDataset, val_idx: list[int], ckpt: dict,
+                      args) -> None:
+    """
+    Refuse to report an accuracy number the crop regime makes meaningless.
+
+    This is the guard that was missing. A checkpoint trained on cube crops
+    and evaluated on full frames does not degrade gracefully — it reads as
+    a broken model. The eval that concluded "all23 scores 7-9% on live
+    sessions" was exactly this, and the same weights scored 84-91% once the
+    validation sessions had their crops.json.
+    """
+    val_sessions = {ds.sample_session[i] for i in val_idx}
+    uncropped = sorted(s for s in val_sessions
+                       if ds.session_crop.get(s) != "cropped")
+    trained = ckpt.get("crop_regime")
+
+    print(f"  Crop regime: eval "
+          f"{'cropped' if not uncropped else 'MIXED/full-frame'}"
+          f"   |   checkpoint trained: {trained or 'unrecorded (pre-2026-07-25)'}")
+
+    if not uncropped:
+        if trained == "full-frame":
+            print(f"\n  NOTE: this checkpoint was trained FULL-FRAME but is "
+                  f"being evaluated on cube\n        crops. The number below "
+                  f"understates it for the same reason the reverse\n"
+                  f"        overstates nothing — it is simply the wrong "
+                  f"input scale.")
+        return
+
+    print(f"\n  {len(uncropped)} of {len(val_sessions)} validation session(s) "
+          f"have no crops.json:")
+    for s in uncropped:
+        print(f"    {s}")
+    print(f"\n  These will be scored on FULL FRAMES while every inference "
+          f"path in the repo\n  crops to the cube box. The per-class numbers "
+          f"below would describe a scale\n  mismatch, not this model. Fix:\n\n"
+          f"      python cache_crops.py --sessions training_data/solve_*/\n")
+    if not args.allow_uncropped:
+        sys.exit("Refusing to report a crop-mismatched evaluation "
+                 "(--allow-uncropped to override).")
+    print(f"  --allow-uncropped given; the numbers below are not comparable "
+          f"to cropped ones.\n")
+
+
 def evaluate(args):
     """
     Evaluate on the VALIDATION split only — same 80/20 stratified split
@@ -686,7 +1023,10 @@ def evaluate(args):
     if len(full_ds) == 0:
         sys.exit("No samples found.")
 
-    # Reproduce training's val split. Prefer the session names recorded in
+    # Reproduce training's val split.  (crop check happens after the split
+    # is known — only the VALIDATION sessions' crop state can affect this
+    # number, and refusing on a training session nobody is scoring would be
+    # noise.) Prefer the session names recorded in
     # the checkpoint — that is exact even if --sessions globs differently
     # now than it did at training time. Fall back to re-deriving the split.
     ckpt_sessions = ckpt.get("val_session_names")
@@ -717,6 +1057,8 @@ def evaluate(args):
           f"{num_diffs}-diff input, {label_mode} labels, "
           f"val_acc={ckpt['val_acc']:.1f}% at save time)")
 
+    _check_eval_crops(full_ds, val_idx, ckpt, args)
+
     if holdout == "session":
         print(f"Evaluating on {len(val_ds)} moves from "
               f"{len(held_out)} fully held-out session(s): "
@@ -738,11 +1080,20 @@ _inference_model  = None
 _inference_device = None
 _inference_diffs  = NUM_DIFFS
 _inference_names  = CLASS_NAMES
+# Which checkpoint the globals above currently hold. Keyed, not just a
+# not-None flag: predict_probs() takes a model_path argument, and without
+# this the SECOND path passed in one process was silently ignored and every
+# later prediction came from the first model loaded — which would quietly
+# report one model's accuracy under another model's name in any script that
+# compares checkpoints in a single run.
+_inference_path   = None
+_inference_crop   = None
+
 
 def load_for_inference(model_path: str = MODEL_PATH):
     """Load the trained model for use in a live pipeline."""
     global _inference_model, _inference_device, _inference_diffs, \
-           _inference_names
+           _inference_names, _inference_path, _inference_crop
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt   = torch.load(model_path, map_location=device)
     num_diffs  = ckpt.get("num_diffs", 1)  # pre-stack checkpoints were 1-diff
@@ -754,13 +1105,35 @@ def load_for_inference(model_path: str = MODEL_PATH):
     _inference_device = device
     _inference_diffs  = num_diffs
     _inference_names  = ckpt.get("class_names", LABEL_MODES[label_mode][0])
+    _inference_path   = str(model_path)
+    _inference_crop   = ckpt.get("crop_regime")
     return model, device
 
 
-def predict(frames_bgr: list[np.ndarray],
-            model_path: str = MODEL_PATH) -> tuple[int, str, float]:
+def inference_crop_regime(model_path: str = MODEL_PATH) -> str | None:
     """
-    Predict which face moved (and direction) from an ordered move window.
+    'cropped' / 'full-frame' / 'mixed' for a checkpoint, or None if it
+    predates the field. Read without loading the weights, so callers can
+    check the input contract before committing to a model.
+    """
+    try:
+        ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+    except Exception:
+        return None
+    return ckpt.get("crop_regime")
+
+
+def predict_probs(frames_bgr: list[np.ndarray],
+                  model_path: str = MODEL_PATH
+                  ) -> tuple[np.ndarray, list[str]]:
+    """
+    Full softmax over the move classes for an ordered move window.
+
+    The whole distribution, not just the argmax, because downstream
+    consumers (move_detector/reconstruct.py) treat classification as a
+    noisy channel: the cost of hypothesising "this move was actually U'"
+    is -log p(U'), which needs every class's probability, not only the
+    winner's.
 
     Parameters
     ----------
@@ -771,11 +1144,11 @@ def predict(frames_bgr: list[np.ndarray],
 
     Returns
     -------
-    (class_id, class_name, confidence)
+    (probs, class_names) — probs is a float ndarray aligned to class_names.
     """
     global _inference_model, _inference_device, _inference_diffs
 
-    if _inference_model is None:
+    if _inference_model is None or _inference_path != str(model_path):
         load_for_inference(model_path)
 
     need = _inference_diffs + 1
@@ -792,11 +1165,25 @@ def predict(frames_bgr: list[np.ndarray],
 
     with torch.no_grad():
         logits = _inference_model(t)
-        probs  = torch.softmax(logits, dim=1).squeeze().cpu()
+        probs  = torch.softmax(logits, dim=1).squeeze().cpu().numpy()
 
-    cls  = probs.argmax().item()
-    conf = probs[cls].item()
-    return cls, _inference_names[cls], round(conf, 3)
+    return probs, list(_inference_names)
+
+
+def predict(frames_bgr: list[np.ndarray],
+            model_path: str = MODEL_PATH) -> tuple[int, str, float]:
+    """
+    Predict which face moved (and direction) from an ordered move window.
+    See predict_probs for parameters; this is its argmax.
+
+    Returns
+    -------
+    (class_id, class_name, confidence)
+    """
+    probs, names = predict_probs(frames_bgr, model_path)
+    cls  = int(np.argmax(probs))
+    conf = float(probs[cls])
+    return cls, names[cls], round(conf, 3)
 
 
 # ---------------------------------------------------------------------------
@@ -829,6 +1216,33 @@ if __name__ == "__main__":
     parser.add_argument("--val-sessions", type=int, default=None,
                         help="How many sessions to hold out with "
                              "--holdout session (default: 20%% of them)")
+    parser.add_argument("--val-session-names", nargs="+", default=None,
+                        help="Hold out these sessions by name instead of "
+                             "picking at random. Use this when the sessions "
+                             "span several recording environments, so the "
+                             "holdout can be made to span them too — "
+                             "otherwise a random pick can land inside one "
+                             "environment and report within-environment fit "
+                             "as if it were cross-environment")
+    parser.add_argument("--allow-uncropped", action="store_true",
+                        help="Proceed even though some sessions have no "
+                             "crops.json. Off by default: inference ALWAYS "
+                             "crops to the cube box, so a mixed regime "
+                             "trains (or scores) the model at a scale it is "
+                             "never shown live — the 2026-07-24 bug. Run "
+                             "cache_crops.py instead of reaching for this.")
+    parser.add_argument("--anchor-jitter", action="store_true",
+                        help="Rebuild each training window around an anchor "
+                             "shifted by a few frames, sampled from the "
+                             "offset distribution measured on live takes. "
+                             "Targets the one thing window_audit.py showed "
+                             "actually costs accuracy — inference cannot "
+                             "reproduce the trainer's exact window because "
+                             "its anchor is quantised to a frame — by making "
+                             "the model insensitive to it instead of trying "
+                             "to fix it at inference (tried, p=0.40). Needs "
+                             "raw frames/; sessions without it keep the "
+                             "fixed window.")
     parser.add_argument("--dropout", type=float, default=0.4,
                         help="Dropout before the classifier head")
     parser.add_argument("--weight-decay", type=float, default=1e-2,

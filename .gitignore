@@ -25,6 +25,18 @@ ble/training_data/
 # generated on first solve() call (~1 min), cached to speed up subsequent runs.
 tables.json
 
+# QTM pattern-database cache built by ble/move_detector/reconstruct.py
+ble/move_detector/reconstruct_tables.npz
+
+# Ad-hoc experiment run logs and measurement result dumps — regenerate by
+# re-running the scripts that produced them (see ble/move_detector/*.py
+# module docstrings for the invocations); not source.
+ble/*.log
+ble/*.json
+ble/move_detector/*.log
+ble/move_detector/scorecards/
+ble/move_detector/crop_contact_sheet.png
+
 # OS
 Thumbs.db
 .DS_Store

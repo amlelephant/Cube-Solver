@@ -126,6 +126,12 @@ class SessionStream(ArrayStream):
                          fps=float(data["fps"]),
                          onset_idx=data["onset_idx"].astype(int),
                          sigma=sigma)
+        # Written by prepare_data.py since 2026-07-25. Streams prepared
+        # before that carry no field; "unknown" is reported as such rather
+        # than assumed clean — the whole point is that a silent assumption
+        # here is what cost the classifier a day.
+        self.crop_mode = (str(data["crop_mode"]) if "crop_mode" in data
+                          else "unknown")
 
 
 def to_tensor(block: np.ndarray) -> torch.Tensor:
@@ -231,6 +237,50 @@ def load_streams(session_dirs: list[Path], sigma: float = SIGMA
         print(f"  Run prepare_data.py first (sessions recorded without "
               f"--keep-frames cannot be prepared).")
     return streams
+
+
+def check_crop_regime(streams: list[SessionStream],
+                      allow_mixed: bool = False) -> str:
+    """
+    Report the crop regime across a set of streams; refuse a mixed one.
+
+    Live inference (live_detect.analyse) crops every frame to the cube box.
+    A stream prepared with --no-crop, or one where the cube was never
+    detected, is a centered square instead — a completely different scale
+    for the same 96x96 tensor. Training on both teaches the model to
+    average over two input distributions and then be tested on one of them.
+    This is the same failure the move CLASSIFIER shipped with until
+    2026-07-24; it is checked here so the detector cannot repeat it.
+    """
+    modes: dict[str, list[str]] = {}
+    for s in streams:
+        modes.setdefault(s.crop_mode, []).append(s.name)
+
+    if set(modes) == {"cropped"}:
+        print(f"  Crops:     all {len(streams)} stream(s) cube-cropped")
+        return "cropped"
+
+    print(f"\n  Crop regime across {len(streams)} stream(s):")
+    for mode, names in sorted(modes.items()):
+        print(f"    {mode:<14} {len(names):>3}"
+              + (f"   e.g. {names[0]}" if mode != "cropped" else ""))
+
+    if "unknown" in modes and len(modes) == 1:
+        print(f"\n  Every stream predates crop provenance. Re-run "
+              f"prepare_data.py --force to\n  record it, or accept that "
+              f"a --no-crop stream could be hiding in here.")
+        return "unknown"
+
+    bad = [n for m, names in modes.items() if m != "cropped" for n in names]
+    print(f"\n  {len(bad)} stream(s) are not cube-cropped while live "
+          f"inference always crops.\n  Re-prepare them with a working "
+          f"detector:\n\n      python prepare_data.py --sessions "
+          f"../training_data/solve_*/ --force\n")
+    if not allow_mixed:
+        raise SystemExit("Refusing to train on a mixed crop regime "
+                         "(--allow-uncropped to override).")
+    print(f"  --allow-uncropped given; proceeding on a mixed regime.\n")
+    return "mixed"
 
 
 def split_streams(streams: list[SessionStream], val_sessions: int | None = None,

@@ -62,7 +62,7 @@ except ImportError:
 
 from dataset import (SessionStream, OnsetClipDataset, load_streams,
                      split_streams, split_clips_pooled, overlap_frac,
-                     CLIP_LEN, SIGMA)
+                     check_crop_regime, CLIP_LEN, SIGMA)
 from model import build_model, score_stream
 from decode import (peak_pick, match_onsets, sweep_threshold, format_metrics,
                     MIN_SEP, THRESHOLD, TOLERANCE, BETA)
@@ -162,6 +162,10 @@ def train(args):
     streams = load_streams(session_dirs, sigma=args.sigma)
     if not streams:
         sys.exit("No prepared sessions. Run prepare_data.py first.")
+
+    # Before anything else: are all these streams the same input scale?
+    crop_regime = check_crop_regime(streams,
+                                    allow_mixed=args.allow_uncropped)
 
     if args.holdout == "none":
         # Final fit: no validation at all. Every session trains, for a FIXED
@@ -296,6 +300,7 @@ def train(args):
                 "holdout": "none",
                 "val_session_names": [],
                 "train_session_names": [s.name for s in streams],
+                "crop_regime": crop_regime,
                 "sigma": args.sigma,
                 "clip_len": args.clip_len,
                 "threshold": args.threshold,
@@ -317,6 +322,7 @@ def train(args):
                 # what this model has already memorised, and will happily
                 # report training-set fit as held-out performance.
                 "train_session_names": [s.name for s in train_s],
+                "crop_regime": crop_regime,
                 "sigma": args.sigma,
                 "pos_weight": args.pos_weight,
                 "clip_len": args.clip_len,
@@ -548,6 +554,11 @@ if __name__ == "__main__":
                    help="With --eval, also score sessions the checkpoint "
                         "trained on. Off by default because that number is "
                         "memorisation, not performance")
+    p.add_argument("--allow-uncropped", action="store_true",
+                   help="Proceed even though some prepared streams are not "
+                        "cube-cropped. Off by default: live inference always "
+                        "crops, so a mixed set trains two input scales and "
+                        "is tested on one — see dataset.check_crop_regime")
     args = p.parse_args()
 
     if args.clip_len <= 61:

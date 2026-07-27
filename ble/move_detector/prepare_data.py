@@ -60,6 +60,11 @@ CROP_STRIDE  = 10    # detect every Nth frame (~3Hz at 30fps)
 SMOOTH_WIN   = 5     # rolling median over this many detections (~1.7s)
 STREAM_FILE  = "detector_stream.npz"
 
+try:
+    from crop_utils import CROP_MARGIN
+except Exception:                                       # pragma: no cover
+    CROP_MARGIN = -1.0
+
 
 def load_jsonl(path: Path) -> list[dict]:
     return [json.loads(l) for l in open(path) if l.strip()]
@@ -224,9 +229,11 @@ def prepare_session(session_dir: Path, detector, force: bool = False) -> bool:
         if n_det == 0:
             crop_note = "cube never detected -> centered square"
     else:
+        n_det = 0
         probe = cv2.imread(str(paths[0]))
         boxes = np.tile(center_square(probe.shape), (n, 1)).astype(np.int32)
         crop_note = "no detector -> centered square"
+    crop_mode = "cropped" if n_det else "center-square"
 
     # Decode, crop, downscale (grayscale read is cheaper than color here)
     out = build_gray_stream(
@@ -242,13 +249,29 @@ def prepare_session(session_dir: Path, detector, force: bool = False) -> bool:
     align_ms = np.abs(ts[onset_idx] - move_ts) * 1000
     dupes    = len(onset_idx) - len(np.unique(onset_idx))
 
+    # crop_mode / crop_margin travel WITH the stream. The classifier had
+    # exactly this hole until 2026-07-25 — a mix of cropped and full-frame
+    # training data with nothing in the artifact to say so — and here it
+    # would be worse, because the .npz is a black box of 96x96 greys that
+    # nobody can eyeball. dataset.py refuses a mixed set on the strength of
+    # these two fields.
     np.savez_compressed(out_path, frames=out, onset_idx=onset_idx,
-                        onset_ts=move_ts, fps=fps, name=session_dir.name)
+                        onset_ts=move_ts, fps=fps, name=session_dir.name,
+                        crop_mode=crop_mode,
+                        crop_margin=(CROP_MARGIN if n_det else -1.0),
+                        n_detections=n_det)
 
     size_mb = out_path.stat().st_size / 1e6
     print(f"  {session_dir.name}: {n} frames, {len(moves)} onsets, "
           f"{fps:.1f}fps, {size_mb:.0f}MB")
-    print(f"      crop: {crop_note}")
+    print(f"      crop: {crop_note}  [{crop_mode}]")
+    if crop_mode != "cropped":
+        print(f"      WARNING: this stream is NOT cube-cropped. Live "
+              f"inference always crops, so")
+        print(f"               training on it mixes two input scales — "
+              f"train.py will refuse the")
+        print(f"               mixed set. Fix the detector and re-run with "
+              f"--force.")
     print(f"      onset->frame alignment: median {np.median(align_ms):.0f}ms, "
           f"max {align_ms.max():.0f}ms")
     if dupes:
@@ -258,6 +281,66 @@ def prepare_session(session_dir: Path, detector, force: bool = False) -> bool:
               f"{fps:.0f}fps. Unresolvable here;")
         print(f"            see decode.py on the resulting recall ceiling.")
     return True
+
+
+def backfill_crop_mode(session_dir: Path, samples: int = 5) -> str | None:
+    """
+    Determine an existing stream's crop mode from the stream ITSELF.
+
+    Streams written before 2026-07-25 carry no crop_mode. Stamping them
+    "cropped" on faith would defeat the point of recording it, so instead
+    this re-derives the answer from evidence: render a few of the session's
+    raw frames through the centered-square path and compare against what is
+    actually stored in the .npz. A center-square stream matches almost
+    exactly; a cube-cropped one is a completely different image.
+
+    Returns the mode written, or None if the session could not be judged
+    (no raw frames left on disk — then the honest answer stays "unknown").
+    """
+    path = session_dir / STREAM_FILE
+    if not path.exists():
+        return None
+    data = dict(np.load(path, allow_pickle=True))
+    if "crop_mode" in data:
+        return str(data["crop_mode"])
+
+    frames_dir = session_dir / "frames"
+    idx_file   = session_dir / "frames.jsonl"
+    if not frames_dir.is_dir() or not idx_file.exists():
+        return None
+
+    recs   = load_jsonl(idx_file)
+    stored = data["frames"]
+    n      = min(len(recs), len(stored))
+    if n < samples:
+        return None
+
+    errs = []
+    for i in np.linspace(n * 0.1, n * 0.9, samples).astype(int):
+        p = frames_dir / recs[int(i)]["file"]
+        if not p.exists():
+            continue
+        img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            continue
+        cs = cv2.resize(crop_to_box(img, center_square(img.shape)),
+                        (FRAME_SIZE, FRAME_SIZE), interpolation=cv2.INTER_AREA)
+        errs.append(float(np.abs(cs.astype(np.int16)
+                                 - stored[int(i)].astype(np.int16)).mean()))
+    if not errs:
+        return None
+
+    # A center-square stream reproduces the center-square render to within
+    # JPEG noise; measured on 28 real cube-cropped sessions the same
+    # comparison sits at 40-61 mean absolute grey levels. The gap is wide
+    # enough that any threshold in between decides it.
+    mode = "center-square" if float(np.median(errs)) < 5.0 else "cropped"
+    data["crop_mode"]   = mode
+    data["crop_margin"] = CROP_MARGIN if mode == "cropped" else -1.0
+    np.savez_compressed(path, **data)
+    print(f"  {session_dir.name}: crop_mode={mode} "
+          f"(center-square distance {np.median(errs):.1f})")
+    return mode
 
 
 if __name__ == "__main__":
@@ -270,6 +353,11 @@ if __name__ == "__main__":
                         help="Rebuild even if detector_stream.npz exists")
     parser.add_argument("--no-crop", action="store_true",
                         help="Skip cube detection; use a centered square crop")
+    parser.add_argument("--backfill-crop-mode", action="store_true",
+                        help="Add the crop_mode field to streams prepared "
+                             "before it existed, deciding it by comparing "
+                             "each stream against a centered-square render "
+                             "of its own raw frames. Rebuilds nothing")
     args = parser.parse_args()
 
     session_dirs = [Path(p) for pattern in args.sessions
@@ -278,6 +366,23 @@ if __name__ == "__main__":
     session_dirs = [d for d in session_dirs if d.is_dir()]
     if not session_dirs:
         sys.exit("No session directories found. Check --sessions.")
+
+    if args.backfill_crop_mode:
+        print(f"\nBackfilling crop_mode for {len(session_dirs)} session(s)...")
+        seen = {}
+        for d in sorted(session_dirs):
+            m = backfill_crop_mode(d)
+            if m:
+                seen[m] = seen.get(m, 0) + 1
+        print(f"\n  {dict(seen)}")
+        undecided = [d.name for d in session_dirs
+                     if (d / STREAM_FILE).exists()
+                     and "crop_mode" not in np.load(d / STREAM_FILE,
+                                                    allow_pickle=True)]
+        if undecided:
+            print(f"  {len(undecided)} stream(s) could not be judged (raw "
+                  f"frames gone) and stay 'unknown'.")
+        sys.exit(0)
 
     detector = None
     if not args.no_crop:
