@@ -60,6 +60,15 @@ CROP_STRIDE  = 10    # detect every Nth frame (~3Hz at 30fps)
 SMOOTH_WIN   = 5     # rolling median over this many detections (~1.7s)
 STREAM_FILE  = "detector_stream.npz"
 
+# MODEL_REWORK_PLAN.md Stage A: a second, colour stream alongside the
+# original grayscale one — NOT a replacement. detector_stream.npz and the
+# deployed onset-only model/pipeline are completely untouched; --color
+# writes this file instead, read only by the new joint model's dataset
+# loader (dataset.JointSessionStream). Kept as a separate file rather than
+# widening the existing one so a stale/partial Stage A prototype can never
+# silently change what the shipped detector trains or scores on.
+STREAM_FILE_COLOR = "detector_stream_color.npz"
+
 try:
     from crop_utils import CROP_MARGIN
 except Exception:                                       # pragma: no cover
@@ -175,10 +184,47 @@ def build_gray_stream(load_frame, boxes: np.ndarray, n_frames: int
     return out
 
 
-def prepare_session(session_dir: Path, detector, force: bool = False) -> bool:
-    out_path = session_dir / STREAM_FILE
+def build_color_stream(load_frame, boxes: np.ndarray, n_frames: int
+                       ) -> np.ndarray:
+    """
+    (N, FRAME_SIZE, FRAME_SIZE, 3) uint8 BGR, each frame cropped to its box.
+
+    Stage A's colour counterpart to build_gray_stream — same crop/resize
+    geometry, so the two streams see identical framing and differ only in
+    whether the model can see colour. Kept as a separate function (not a
+    `color: bool` branch inside build_gray_stream) because the two are
+    consumed by completely different pipelines and must never silently
+    swap into each other's callers.
+    """
+    out = np.empty((n_frames, FRAME_SIZE, FRAME_SIZE, 3), dtype=np.uint8)
+    for i in range(n_frames):
+        img = load_frame(i)
+        if img is None:
+            out[i] = out[i - 1] if i > 0 else 0
+            continue
+        if img.ndim == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        elif img.shape[2] == 1:
+            img = cv2.cvtColor(img[:, :, 0], cv2.COLOR_GRAY2BGR)
+        out[i] = cv2.resize(crop_to_box(img, boxes[i]),
+                            (FRAME_SIZE, FRAME_SIZE),
+                            interpolation=cv2.INTER_AREA)
+    return out
+
+
+def _wca_class_index() -> dict:
+    """WCA move name -> 0-11, matching reconstruct.WCA12 / train_move_
+    classifier.WCA_CLASS_NAMES exactly (imported so Stage A's onset_class
+    array can never drift out of that ordering)."""
+    from train_move_classifier import WCA_INDEX
+    return WCA_INDEX
+
+
+def prepare_session(session_dir: Path, detector, force: bool = False,
+                    color: bool = False) -> bool:
+    out_path = session_dir / (STREAM_FILE_COLOR if color else STREAM_FILE)
     if out_path.exists() and not force:
-        print(f"  {session_dir.name}: {STREAM_FILE} exists, skipping "
+        print(f"  {session_dir.name}: {out_path.name} exists, skipping "
               f"(--force to redo)")
         return True
 
@@ -235,9 +281,15 @@ def prepare_session(session_dir: Path, detector, force: bool = False) -> bool:
         crop_note = "no detector -> centered square"
     crop_mode = "cropped" if n_det else "center-square"
 
-    # Decode, crop, downscale (grayscale read is cheaper than color here)
-    out = build_gray_stream(
-        lambda i: cv2.imread(str(paths[i]), cv2.IMREAD_GRAYSCALE), boxes, n)
+    # Decode, crop, downscale. Colour mode needs the full BGR frame (Stage
+    # A's class head); the deployed onset-only path reads grayscale only,
+    # cheaper to decode, and is left byte-for-byte unchanged.
+    if color:
+        out = build_color_stream(load_color, boxes, n)
+    else:
+        out = build_gray_stream(
+            lambda i: cv2.imread(str(paths[i]), cv2.IMREAD_GRAYSCALE),
+            boxes, n)
 
     # Map each BLE move timestamp to its nearest frame index
     move_ts   = np.array([m["timestamp"] for m in moves], dtype=np.float64)
@@ -249,21 +301,45 @@ def prepare_session(session_dir: Path, detector, force: bool = False) -> bool:
     align_ms = np.abs(ts[onset_idx] - move_ts) * 1000
     dupes    = len(onset_idx) - len(np.unique(onset_idx))
 
+    extra = {}
+    n_unresolved = 0
+    if color:
+        # Stage A's class head needs a WCA index per onset. Onsets whose
+        # move could not be resolved to a quarter turn (half-turns the
+        # tracker coalesced, or a dropped BLE decode — see ble_truth.py's
+        # words_between) carry no usable label and are DROPPED from this
+        # stream entirely (not kept with a sentinel class): a class head
+        # cannot be supervised on "some move happened, I won't say which",
+        # and keeping them in onset_idx while omitting them from
+        # onset_class would desync the two arrays' meaning.
+        wca_idx = _wca_class_index()
+        resolved = [i for i, m in enumerate(moves)
+                   if m.get("wca_notation") in wca_idx]
+        n_unresolved = len(moves) - len(resolved)
+        onset_idx = onset_idx[resolved]
+        move_ts = move_ts[resolved]
+        align_ms = align_ms[resolved]
+        onset_class = np.array(
+            [wca_idx[moves[i]["wca_notation"]] for i in resolved],
+            dtype=np.int32)
+        extra = {"onset_class": onset_class}
+
     # crop_mode / crop_margin travel WITH the stream. The classifier had
     # exactly this hole until 2026-07-25 — a mix of cropped and full-frame
     # training data with nothing in the artifact to say so — and here it
-    # would be worse, because the .npz is a black box of 96x96 greys that
+    # would be worse, because the .npz is a black box of 96x96 pixels that
     # nobody can eyeball. dataset.py refuses a mixed set on the strength of
     # these two fields.
     np.savez_compressed(out_path, frames=out, onset_idx=onset_idx,
                         onset_ts=move_ts, fps=fps, name=session_dir.name,
                         crop_mode=crop_mode,
                         crop_margin=(CROP_MARGIN if n_det else -1.0),
-                        n_detections=n_det)
+                        n_detections=n_det, **extra)
 
     size_mb = out_path.stat().st_size / 1e6
-    print(f"  {session_dir.name}: {n} frames, {len(moves)} onsets, "
-          f"{fps:.1f}fps, {size_mb:.0f}MB")
+    print(f"  {session_dir.name}: {n} frames, {len(onset_idx)} onsets"
+          + (f" ({n_unresolved} unresolved dropped)" if n_unresolved else "")
+          + f", {fps:.1f}fps, {size_mb:.0f}MB")
     print(f"      crop: {crop_note}  [{crop_mode}]")
     if crop_mode != "cropped":
         print(f"      WARNING: this stream is NOT cube-cropped. Live "
@@ -358,6 +434,13 @@ if __name__ == "__main__":
                              "before it existed, deciding it by comparing "
                              "each stream against a centered-square render "
                              "of its own raw frames. Rebuilds nothing")
+    parser.add_argument("--color", action="store_true",
+                        help="MODEL_REWORK_PLAN.md Stage A: write "
+                             "detector_stream_color.npz (BGR frames + "
+                             "onset_class) instead of the deployed "
+                             "grayscale-only detector_stream.npz. The two "
+                             "are independent files; this never touches "
+                             "the shipped stream.")
     args = parser.parse_args()
 
     session_dirs = [Path(p) for pattern in args.sessions
@@ -395,8 +478,9 @@ if __name__ == "__main__":
                   "will fill less of\n"
                   "         the input. Pass --no-crop to silence this.\n")
 
-    print(f"\nPreparing {len(session_dirs)} session(s)...")
-    ok = sum(prepare_session(d, detector, force=args.force)
+    print(f"\nPreparing {len(session_dirs)} session(s)"
+          + (" [--color: Stage A stream]" if args.color else "") + "...")
+    ok = sum(prepare_session(d, detector, force=args.force, color=args.color)
              for d in sorted(session_dirs))
     print(f"\nDone: {ok}/{len(session_dirs)} session(s) ready.")
     if ok == 0:

@@ -34,8 +34,14 @@ ble/move_detector/reconstruct_tables.npz
 ble/*.log
 ble/*.json
 ble/move_detector/*.log
+ble/move_detector/*.json
 ble/move_detector/scorecards/
 ble/move_detector/crop_contact_sheet.png
+
+# Rendered figures from viz_encodings.py / raft_flow_viz.py — regenerate
+# from a session, not source.
+ble/viz_out/
+ble/viz_flow/
 
 # OS
 Thumbs.db

@@ -30,6 +30,20 @@ Architecture
                  receptive field 61 frames ~= 2.0s at 30fps
   head           1x1 conv -> (T,) logits
 
+Stage A (MODEL_REWORK_PLAN.md): a joint variant of this SAME architecture
+adds a second 1x1 conv head predicting, per frame, a 13-way distribution
+(12 WCA quarter turns + background) instead of only "is a move happening
+here". `OnsetDetector(n_classes=13, in_channels=4)` widens FrameEncoder's
+first conv to accept RGB+diff (see dataset.JointSessionStream) and adds
+`class_head`; `n_classes=None` (the default) reproduces this module
+EXACTLY as it shipped before Stage A — every existing checkpoint, every
+existing caller of `build_model`/`score_stream`, is unaffected. Motivation
+(measured, not assumed): G2's oracle attribution
+(oracle_attribution.py, 2026-07-28) found the detector/classifier
+boundary — not classifier accuracy — responsible for ~81% of the honest
+verification gap, and this boundary (peak-pick -> fixed window -> a
+SEPARATE model with no colour input) is the thing a joint model removes.
+
 Why a TCN rather than the ConvLSTM: with ~800 moves from a dozen
 homogeneous sessions, a ConvLSTM over raw frames has enough capacity to
 memorize grip and lighting, and you cannot then tell "wrong architecture"
@@ -56,12 +70,15 @@ TCN_DILATIONS = (1, 2, 4, 8)
 
 
 class FrameEncoder(nn.Module):
-    """(N, 2, 96, 96) -> (N, FEAT_DIM). Applied to every frame independently."""
+    """(N, C, 96, 96) -> (N, FEAT_DIM). Applied to every frame independently.
 
-    def __init__(self, feat_dim: int = FEAT_DIM):
+    `in_channels` defaults to the shipped 2 (grayscale + diff); Stage A's
+    joint model passes 4 (RGB + diff, see dataset.JointSessionStream)."""
+
+    def __init__(self, feat_dim: int = FEAT_DIM, in_channels: int = IN_CHANNELS):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(IN_CHANNELS, 32, 5, stride=2, padding=2, bias=False),
+            nn.Conv2d(in_channels, 32, 5, stride=2, padding=2, bias=False),
             nn.BatchNorm2d(32), nn.ReLU(inplace=True),       # 48x48
             nn.Conv2d(32, 64, 3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(64), nn.ReLU(inplace=True),       # 24x24
@@ -104,20 +121,26 @@ class TCNBlock(nn.Module):
 
 class OnsetDetector(nn.Module):
     """
-    (B, T, 2, H, W) -> (B, T) per-frame onset logits.
+    (B, T, C, H, W) -> (B, T) per-frame onset logits, or, with
+    `n_classes` set (Stage A), a tuple ((B, T) onset logits, (B, T,
+    n_classes) class logits) from a second head sharing the same trunk.
 
     Fully convolutional in time: train on fixed-length clips, then run a
     whole session in one pass at inference (no windowing, no stitching).
     """
 
     def __init__(self, feat_dim: int = FEAT_DIM,
-                 dilations: tuple = TCN_DILATIONS, dropout: float = 0.1):
+                 dilations: tuple = TCN_DILATIONS, dropout: float = 0.1,
+                 in_channels: int = IN_CHANNELS, n_classes: int | None = None):
         super().__init__()
-        self.encoder = FrameEncoder(feat_dim)
+        self.encoder = FrameEncoder(feat_dim, in_channels=in_channels)
         self.tcn = nn.Sequential(*[
             TCNBlock(feat_dim, d, dropout) for d in dilations
         ])
         self.head = nn.Conv1d(feat_dim, 1, 1)
+        self.n_classes = n_classes
+        self.class_head = nn.Conv1d(feat_dim, n_classes, 1) \
+            if n_classes else None
 
     @property
     def receptive_field(self) -> int:
@@ -125,15 +148,32 @@ class OnsetDetector(nn.Module):
         return 1 + sum(4 * d for d in
                        [b.net[0].dilation[0] for b in self.tcn])
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor):
         b, t = x.shape[:2]
         feats = self.encoder(x.flatten(0, 1))        # (B*T, F)
         feats = feats.view(b, t, -1).transpose(1, 2) # (B, F, T)
-        return self.head(self.tcn(feats)).squeeze(1) # (B, T)
+        trunk = self.tcn(feats)
+        onset_logits = self.head(trunk).squeeze(1)    # (B, T)
+        if self.class_head is None:
+            return onset_logits
+        class_logits = self.class_head(trunk).transpose(1, 2)  # (B, T, K)
+        return onset_logits, class_logits
 
 
 def build_model(device: torch.device, dropout: float = 0.1) -> OnsetDetector:
     return OnsetDetector(dropout=dropout).to(device)
+
+
+# Stage A (MODEL_REWORK_PLAN.md): 12 WCA quarter turns + 1 background class.
+JOINT_IN_CHANNELS = 4   # R, G, B, diff-luma — see dataset.to_tensor_color
+JOINT_N_CLASSES = 13
+
+
+def build_joint_model(device: torch.device, dropout: float = 0.1,
+                      in_channels: int = JOINT_IN_CHANNELS,
+                      n_classes: int = JOINT_N_CLASSES) -> OnsetDetector:
+    return OnsetDetector(dropout=dropout, in_channels=in_channels,
+                        n_classes=n_classes).to(device)
 
 
 @torch.no_grad()
@@ -169,3 +209,47 @@ def score_stream(model: OnsetDetector, stream, device: torch.device,
         start = end
 
     return 1.0 / (1.0 + np.exp(-out))
+
+
+@torch.no_grad()
+def score_stream_joint(model: OnsetDetector, stream, device: torch.device,
+                       chunk: int = 480) -> tuple:
+    """
+    Stage A counterpart of score_stream for a joint (onset + class) model.
+    Same chunk-with-discarded-margin construction, for the same reason.
+
+    Returns (onset_prob (T,), class_prob (T, n_classes)) — onset_prob is
+    the sigmoid onset score exactly as score_stream produces; class_prob
+    is a per-frame softmax over ALL n_classes (12 WCA quarter turns +
+    background), so its LAST column is the class head's OWN background
+    posterior — related to but not forced equal to (1 - onset_prob), since
+    the two heads share a trunk but have independent losses (see
+    dataset.build_dense_targets). Consumers decide how to combine them
+    (see joint_decode.py) rather than that choice being made here.
+    """
+    from dataset import to_tensor_color
+
+    model.eval()
+    n = len(stream)
+    margin = model.receptive_field // 2
+    onset_out = np.empty(n, dtype=np.float32)
+    class_out = np.empty((n, model.n_classes), dtype=np.float32)
+
+    start = 0
+    while start < n:
+        end = min(start + chunk, n)
+        lo, hi = max(0, start - margin), min(n, end + margin)
+        x = to_tensor_color(stream.clip_block(lo, hi - lo)).unsqueeze(0).to(device)
+        onset_logits, class_logits = model(x)
+        onset_logits = onset_logits[0].float().cpu().numpy()
+        class_logits = class_logits[0].float().cpu().numpy()
+        sl = slice(start - lo, start - lo + (end - start))
+        onset_out[start:end] = onset_logits[sl]
+        class_out[start:end] = class_logits[sl]
+        start = end
+
+    onset_prob = 1.0 / (1.0 + np.exp(-onset_out))
+    m = class_out.max(axis=1, keepdims=True)
+    e = np.exp(class_out - m)
+    class_prob = e / e.sum(axis=1, keepdims=True)
+    return onset_prob, class_prob

@@ -111,13 +111,67 @@ def _motion_roi(grays: list[np.ndarray], margin: float = 0.12) -> tuple:
             min(w, xs.max() + mx), min(h, ys.max() + my))
 
 
-def compute_features(frames_bgr: list[np.ndarray]) -> np.ndarray | None:
+def _flow_pairs_farneback(crops: list[np.ndarray]):
+    """Farneback flow (H, W, 2) for each consecutive pair of GRAYSCALE crops."""
+    for a, b in zip(crops, crops[1:]):
+        yield cv2.calcOpticalFlowFarneback(a, b, None, **FB_PARAMS)
+
+
+# Lazy-loaded: flow_direction.py's default path (Farneback) has zero torch
+# dependency, and G1 (MODEL_REWORK_PLAN.md) only needs RAFT loaded when
+# --flow-backend raft is actually requested.
+_RAFT_STATE: dict = {}
+
+
+def _load_raft():
+    if not _RAFT_STATE:
+        import torch
+        from torchvision.models.optical_flow import raft_small, Raft_Small_Weights
+        weights = Raft_Small_Weights.DEFAULT
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        _RAFT_STATE["model"] = raft_small(weights=weights).to(device).eval()
+        _RAFT_STATE["device"] = device
+        _RAFT_STATE["transforms"] = weights.transforms()
+        _RAFT_STATE["torch"] = torch
+    return _RAFT_STATE["model"], _RAFT_STATE["device"], \
+        _RAFT_STATE["transforms"], _RAFT_STATE["torch"]
+
+
+def _flow_pairs_raft(crops: list[np.ndarray]):
+    """
+    RAFT flow (H, W, 2) for each consecutive pair of BGR crops (RAFT wants
+    colour, unlike Farneback's grayscale input — see the module docstring's
+    G1 note on why this is worth testing at all: cube turns are exactly the
+    fast-blurred-small-object regime classical pyramidal flow is weak at).
+    """
+    model, device, transforms, torch = _load_raft()
+
+    def to_tensor(bgr):
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        return torch.from_numpy(rgb).permute(2, 0, 1).float().unsqueeze(0)
+
+    with torch.no_grad():
+        for a, b in zip(crops, crops[1:]):
+            t1, t2 = transforms(to_tensor(a), to_tensor(b))
+            flow = model(t1.to(device), t2.to(device))[-1]
+            yield flow[0].permute(1, 2, 0).cpu().numpy()
+
+
+FLOW_BACKENDS = {"farneback": _flow_pairs_farneback, "raft": _flow_pairs_raft}
+
+
+def compute_features(frames_bgr: list[np.ndarray],
+                     flow_backend: str = "farneback") -> np.ndarray | None:
     """
     21-dim signed motion descriptor for an ordered move window.
 
     frames_bgr : >= 2 frames in temporal order (missing window slots
                  simply omitted). Returns None if flow is degenerate
                  (fewer than 2 usable frames, or no measurable motion).
+    flow_backend : "farneback" (default, zero extra deps, byte-identical
+                 to the original implementation) or "raft" (G1,
+                 MODEL_REWORK_PLAN.md — torchvision's pretrained RAFT-small,
+                 loaded lazily on first use).
     """
     frames_bgr = [f for f in frames_bgr if f is not None]
     if len(frames_bgr) < 2:
@@ -125,8 +179,12 @@ def compute_features(frames_bgr: list[np.ndarray]) -> np.ndarray | None:
 
     grays = [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in frames_bgr]
     x0, y0, x1, y1 = _motion_roi(grays)
-    crops = [cv2.resize(g[y0:y1, x0:x1], (FLOW_SIZE, FLOW_SIZE))
-             for g in grays]
+    if flow_backend == "raft":
+        crops = [cv2.resize(f[y0:y1, x0:x1], (FLOW_SIZE, FLOW_SIZE))
+                 for f in frames_bgr]
+    else:
+        crops = [cv2.resize(g[y0:y1, x0:x1], (FLOW_SIZE, FLOW_SIZE))
+                 for g in grays]
 
     # Accumulate magnitude-weighted flow statistics across all pairs
     sum_w     = 0.0
@@ -140,8 +198,7 @@ def compute_features(frames_bgr: list[np.ndarray]) -> np.ndarray | None:
     yy, xx = np.mgrid[0:FLOW_SIZE, 0:FLOW_SIZE].astype(np.float32)
     cell   = FLOW_SIZE // GRID
 
-    for a, b in zip(crops, crops[1:]):
-        flow = cv2.calcOpticalFlowFarneback(a, b, None, **FB_PARAMS)
+    for flow in FLOW_BACKENDS[flow_backend](crops):
         fx, fy = flow[..., 0], flow[..., 1]
         mag = np.sqrt(fx * fx + fy * fy)
 
@@ -310,7 +367,9 @@ def _load_stream_index(session_dir: Path) -> tuple[list[float], list[str]]:
 
 
 def load_session_samples(session_dir: Path, verbose: bool = True,
-                         source: str = "labeled") -> list[tuple[int, int, np.ndarray]]:
+                         source: str = "labeled",
+                         flow_backend: str = "farneback"
+                         ) -> list[tuple[int, int, np.ndarray]]:
     """
     [(face_id, is_ccw, features), ...] for every usable labeled move.
 
@@ -373,7 +432,7 @@ def load_session_samples(session_dir: Path, verbose: bool = True,
                         if img is not None:
                             frames.append(img)
 
-            feats = compute_features(frames)
+            feats = compute_features(frames, flow_backend=flow_backend)
             if feats is None:
                 skipped += 1
                 continue
@@ -421,8 +480,10 @@ def _report(results: list[tuple[int, int, bool]], title: str):
         print(f"  (chance = 50.0%)")
 
 
-def evaluate(session_dirs: list[Path], source: str = "labeled"):
-    per_session = {d.name: load_session_samples(d, source=source)
+def evaluate(session_dirs: list[Path], source: str = "labeled",
+            flow_backend: str = "farneback"):
+    per_session = {d.name: load_session_samples(d, source=source,
+                                                 flow_backend=flow_backend)
                    for d in session_dirs}
     per_session = {k: v for k, v in per_session.items() if v}
 
@@ -464,6 +525,11 @@ if __name__ == "__main__":
     parser.add_argument("--source", choices=["labeled", "stream", "stream-peak"],
                         default="labeled",
                         help="Which frames to run flow on (see load_session_samples)")
+    parser.add_argument("--flow-backend", choices=["farneback", "raft"],
+                        default="farneback",
+                        help="G1 (MODEL_REWORK_PLAN.md): substitute "
+                             "torchvision's pretrained RAFT-small for the "
+                             "default Farneback flow")
     args = parser.parse_args()
 
     session_dirs = [Path(p) for pattern in args.sessions
@@ -477,11 +543,12 @@ if __name__ == "__main__":
     print(f"  Optical-flow direction head")
     print(f"{'='*55}")
 
-    evaluate(session_dirs, source=args.source)
+    evaluate(session_dirs, source=args.source, flow_backend=args.flow_backend)
 
     if args.fit_out:
         samples = [s for d in session_dirs
                    for s in load_session_samples(d, verbose=False,
-                                                 source=args.source)]
+                                                 source=args.source,
+                                                 flow_backend=args.flow_backend)]
         DirectionModel().fit(samples).save(args.fit_out)
         print(f"\n  Model fit on all {len(samples)} samples → {args.fit_out}")

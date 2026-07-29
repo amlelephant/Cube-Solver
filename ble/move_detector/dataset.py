@@ -358,3 +358,201 @@ def split_clips_pooled(dataset: "OnsetClipDataset", val_frac: float = 0.2,
 def overlap_frac(clip_len: int, stride: int) -> float:
     """Fraction of frames a clip shares with its immediate neighbour."""
     return max(0.0, (clip_len - stride) / clip_len)
+
+
+# ---------------------------------------------------------------------------
+# Stage A (MODEL_REWORK_PLAN.md): joint onset+class model — colour streams,
+# dense per-frame 13-way targets. Everything above this line (the shipped
+# onset-only detector) is untouched.
+# ---------------------------------------------------------------------------
+
+STREAM_FILE_COLOR = "detector_stream_color.npz"   # see prepare_data.py --color
+
+# Horizontal-flip class remap, copied from train_move_classifier.WCA_FLIP
+# (kept as a local literal rather than imported, so this module does not
+# have to pull that file's heavier top-level in just for one table — MUST
+# stay in sync if that table ever changes). U/D/F/B just reverse direction
+# (prime toggle); L<->R' and L'<->R because mirroring swaps which
+# PHYSICAL side is which, not just the turn's direction.
+WCA_FLIP = {0: 1, 1: 0, 2: 3, 3: 2, 4: 7, 7: 4, 5: 6, 6: 5,
+           8: 9, 9: 8, 10: 11, 11: 10}
+WCA_FLIP_PERM = np.array([WCA_FLIP[i] for i in range(12)])
+
+
+def build_dense_targets(onset_idx: np.ndarray, onset_class: np.ndarray,
+                        n: int, sigma: float,
+                        onset_target: np.ndarray) -> np.ndarray:
+    """
+    (n, 13) per-frame target: columns 0-11 are the 12 WCA quarter-turn
+    classes, column 12 is background.
+
+    Reuses `onset_target` (the SAME Gaussian-bump array the onset head
+    trains against — ArrayStream._build_target) as the "how much move-mass
+    is here" total, so the class head's background row always agrees with
+    the onset head's own belief; only how that total mass splits across
+    the 12 classes is new here. Per-class bumps use the identical
+    sigma/reach formula, np.maximum'd WITHIN a class (same semantics as
+    the onset target for repeated same-class onsets close together). A
+    rare frame where two DIFFERENT classes' bumps overlap (near-
+    simultaneous different-face turns) is rescaled proportionally so the
+    row still sums to onset_target[i] exactly — every frame is a valid
+    probability simplex over the 13 columns, which is what lets this train
+    with plain per-frame cross-entropy.
+    """
+    reach = max(1, int(np.ceil(3 * sigma)))
+    bumps = np.zeros((n, 12), dtype=np.float32)
+    for o, c in zip(onset_idx, onset_class):
+        lo, hi = max(0, o - reach), min(n, o + reach + 1)
+        d = np.arange(lo, hi) - o
+        b = np.exp(-(d ** 2) / (2 * sigma ** 2))
+        bumps[lo:hi, c] = np.maximum(bumps[lo:hi, c], b)
+
+    raw_sum = bumps.sum(axis=1)
+    scale = np.divide(onset_target, raw_sum, out=np.zeros_like(raw_sum),
+                      where=raw_sum > 1e-8)
+    class_target = bumps * scale[:, None]
+    bg = 1.0 - onset_target
+    return np.concatenate([class_target, bg[:, None]], axis=1).astype(np.float32)
+
+
+class JointArrayStream(ArrayStream):
+    """
+    Stage A's colour counterpart of ArrayStream: (N, H, W, 3) BGR frames,
+    the same onset target as the parent (reused verbatim — see
+    build_dense_targets), plus a (N, 13) class_target.
+    """
+
+    def __init__(self, frames: np.ndarray, name: str = "live",
+                 fps: float = 30.0, onset_idx: np.ndarray | None = None,
+                 onset_class: np.ndarray | None = None, sigma: float = SIGMA):
+        self.onset_class = np.asarray(onset_class, dtype=int) \
+            if onset_class is not None else np.array([], dtype=int)
+        super().__init__(frames=frames, name=name, fps=fps,
+                         onset_idx=onset_idx, sigma=sigma)
+        self.class_target = build_dense_targets(
+            self.onset_idx, self.onset_class, len(self.frames), self.sigma,
+            self.target)
+
+
+class JointSessionStream(JointArrayStream):
+    """One prepared session loaded from its detector_stream_color.npz."""
+
+    def __init__(self, path: Path, sigma: float = SIGMA):
+        data = np.load(path, allow_pickle=True)
+        super().__init__(frames=data["frames"], name=str(data["name"]),
+                         fps=float(data["fps"]),
+                         onset_idx=data["onset_idx"].astype(int),
+                         onset_class=data["onset_class"].astype(int),
+                         sigma=sigma)
+        self.crop_mode = (str(data["crop_mode"]) if "crop_mode" in data
+                          else "unknown")
+
+
+def to_tensor_color(block: np.ndarray) -> torch.Tensor:
+    """
+    (T+1, H, W, 3) uint8 BGR -> (T, 4, H, W) float32.
+
+    Channels: B, G, R (OpenCV's native order — arbitrary but must match
+    prepare_data.build_color_stream and live inference), each centred to
+    [-0.5, 0.5] like to_tensor's grayscale channel, plus a diff-LUMA
+    channel built with the IDENTICAL formula to_tensor uses for its diff
+    channel (signed luma difference from the previous frame) — the onset
+    half of the shared trunk sees the same signal it always has; only
+    colour is new.
+    """
+    a = block.astype(np.float32) / 255.0                  # (T+1, H, W, 3)
+    color = a[1:] - 0.5                                     # (T, H, W, 3)
+    luma = a[..., 2] * 0.299 + a[..., 1] * 0.587 + a[..., 0] * 0.114
+    diff = (luma[1:] - luma[:-1])[..., None]                # (T, H, W, 1)
+    stacked = np.concatenate([color, diff], axis=-1)        # (T, H, W, 4)
+    return torch.from_numpy(np.ascontiguousarray(np.moveaxis(stacked, -1, 1)))
+
+
+def augment_block_color(block: np.ndarray, rng: random.Random
+                        ) -> tuple[np.ndarray, bool]:
+    """Colour counterpart of augment_block; also returns whether it
+    flipped, since (unlike the onset-only detector) the CLASS target is
+    not flip-invariant and the caller must permute it through
+    WCA_FLIP_PERM to match."""
+    out = block
+    flipped = rng.random() < 0.5
+    if flipped:
+        out = out[:, :, ::-1, :]
+
+    alpha = rng.uniform(0.85, 1.15)
+    beta = rng.uniform(-18, 18)
+    out = np.clip(out.astype(np.float32) * alpha + beta, 0, 255)
+
+    sx, sy = rng.randint(-6, 6), rng.randint(-6, 6)
+    if sx or sy:
+        out = np.roll(out, shift=(sy, sx), axis=(1, 2))
+
+    return out.astype(np.uint8), flipped
+
+
+class JointClipDataset(Dataset):
+    """
+    Stage A counterpart of OnsetClipDataset: same fixed-length clip
+    sampling, but each sample also carries a (clip_len, 13) class target,
+    permuted through WCA_FLIP_PERM whenever the image is mirrored — a
+    mirrored R turn looks exactly like a real L' turn, so the label must
+    move with the pixels or the model is trained on the wrong class half
+    the time (same reasoning as train_move_classifier.py's WCA_FLIP).
+    """
+
+    def __init__(self, streams: list[JointSessionStream],
+                clip_len: int = CLIP_LEN, stride: int = 24,
+                augment: bool = True, seed: int = 0):
+        self.streams  = streams
+        self.clip_len = clip_len
+        self.augment  = augment
+        self.rng      = random.Random(seed)
+        self.index    = []
+        for si, s in enumerate(streams):
+            last = len(s) - clip_len
+            if last < 0:
+                continue
+            self.index += [(si, st) for st in range(0, last + 1, stride)]
+
+    def __len__(self) -> int:
+        return len(self.index)
+
+    def __getitem__(self, i):
+        si, start = self.index[i]
+        s = self.streams[si]
+
+        block = s.clip_block(start, self.clip_len)
+        y_onset = s.target[start:start + self.clip_len].copy()
+        y_class = s.class_target[start:start + self.clip_len].copy()
+
+        if self.augment:
+            block, flipped = augment_block_color(block, self.rng)
+            if flipped:
+                y_class = np.concatenate(
+                    [y_class[:, WCA_FLIP_PERM], y_class[:, 12:13]], axis=1)
+
+        return (to_tensor_color(block), torch.from_numpy(y_onset),
+                torch.from_numpy(y_class))
+
+
+def load_joint_streams(session_dirs: list[Path], sigma: float = SIGMA
+                       ) -> list[JointSessionStream]:
+    """Colour-stream counterpart of load_streams — reads
+    detector_stream_color.npz (prepare_data.py --color), not the deployed
+    grayscale detector_stream.npz."""
+    streams, missing = [], []
+    for d in sorted(session_dirs):
+        p = d / STREAM_FILE_COLOR
+        if p.exists():
+            streams.append(JointSessionStream(p, sigma=sigma))
+        else:
+            missing.append(d.name)
+    if missing:
+        print(f"  {len(missing)} session(s) have no {STREAM_FILE_COLOR} and "
+              f"were skipped:")
+        for name in missing[:6]:
+            print(f"    {name}")
+        if len(missing) > 6:
+            print(f"    ... and {len(missing) - 6} more")
+        print(f"  Run `prepare_data.py --color` on them first.")
+    return streams
