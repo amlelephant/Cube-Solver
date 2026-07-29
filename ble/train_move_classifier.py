@@ -3,14 +3,23 @@ train_move_classifier.py
 
 Trains a ResNet-18 to classify which cube face moved and in which direction.
 
-Input:   ORDERED stack of temporal difference images across the move window
-         (before→mid_00→mid_01→mid_02→after = 4 signed diffs = 12 channels).
-         A single diff is order-free — CW and CCW of the same face are
-         time-reversals of each other, so one diff can barely separate
-         them. Stacking the diffs in temporal order as input channels
-         (early fusion) preserves motion order, which is exactly where
-         direction lives. `--diffs 1` reproduces the old single-diff
-         input (mid_01 − before) for ablation.
+Input:   the move window ([before, mid_00, mid_01, mid_02, after]) run
+         through one of the encoders in encodings_move.py (--encoding).
+
+  diffstack (default) — the 4 consecutive signed diffs concatenated as
+         12 input channels. A single diff is order-free — CW and CCW of
+         the same face are time-reversals of each other, so one diff can
+         barely separate them. Stacking the diffs in temporal order as
+         input channels (early fusion) preserves motion order, which is
+         exactly where direction lives. `--diffs 1` reproduces the old
+         single-diff input (mid_01 − before) for ablation.
+
+  rgbtime / chroma / chroma8 — 3-channel encodings that fold the same
+         temporal order into COLOUR instead of into channels, so ResNet's
+         pretrained conv1 is used as trained rather than inflated 4x. See
+         encodings_move.py for what each one does and why. The encoding is
+         recorded in the checkpoint and re-applied at inference; a model
+         is never fed a representation it was not trained on.
 Output:  12 classes. Two label modes (--labels):
 
   wca (default) — camera-relative moved layer from the orientation
@@ -115,8 +124,11 @@ try:
 except Exception:                                       # pragma: no cover
     window_from_anchor = None
 
+from encodings_move import (ENCODINGS, DEFAULT_ENCODING, IMG_SIZE,  # noqa: E402
+                            encode, to_tensor)
+from encodings_move import get as get_encoding                     # noqa: E402
+
 NUM_CLASSES = 12
-IMG_SIZE    = 224    # ResNet-18 standard input size
 MODEL_PATH  = "move_classifier.pt"
 NUM_DIFFS   = 4      # ordered diffs per sample (4 = full window, 1 = legacy)
 
@@ -204,7 +216,8 @@ class MoveDiffDataset(Dataset):
     def __init__(self, session_dirs: list[Path], augment: bool = True,
                  num_diffs: int = NUM_DIFFS, label_mode: str = "wca",
                  anchor_jitter: bool = False,
-                 jitter_pmf: dict | None = None):
+                 jitter_pmf: dict | None = None,
+                 encoding: str = DEFAULT_ENCODING):
         self.samples     = []   # [(frame_paths, label, crop_box), ...]
         # Session name per sample, index-aligned with self.samples. Kept
         # parallel rather than as a 4th tuple field so existing
@@ -212,6 +225,13 @@ class MoveDiffDataset(Dataset):
         self.sample_session = []
         self.augment     = augment
         self.num_diffs   = num_diffs
+        # --diffs 1 is the legacy single-diff input; it is an encoding of
+        # its own in the registry rather than a special case threaded
+        # through every call site.
+        if encoding == "diffstack" and num_diffs == 1:
+            encoding = "diffstack1"
+        self.encoding    = encoding
+        self.enc         = get_encoding(encoding)
         self.label_mode  = label_mode
         self.class_names, self.flip_map = LABEL_MODES[label_mode]
         # Crop provenance, tracked at BOTH granularities on purpose. The
@@ -248,9 +268,11 @@ class MoveDiffDataset(Dataset):
         return WCA_INDEX.get(m.get("wca_notation") or "")
 
     def _window_keys(self) -> list[str]:
-        if self.num_diffs == 1:
+        if self.enc.frames == 2:
+            # Legacy 1-diff pair — mid_01, not mid_00, so previously
+            # reported 1-diff numbers stay reproducible.
             return ["before", "mid_01"]
-        return FRAME_ORDER
+        return FRAME_ORDER[:self.enc.frames]
 
     def _jitter_source(self, session_dir: Path):
         """
@@ -400,9 +422,9 @@ class MoveDiffDataset(Dataset):
 
         imgs = [cv2.imread(str(p)) for p in paths]
         if any(i is None for i in imgs):
-            # Fallback: neutral (no-motion) stack if a file is unreadable
-            stack = np.full((IMG_SIZE, IMG_SIZE, 3 * self.num_diffs), 128,
-                            dtype=np.uint8)
+            # Fallback: neutral (no-motion) input if a file is unreadable
+            stack = np.full((IMG_SIZE, IMG_SIZE, self.enc.channels),
+                            self.enc.neutral, dtype=np.uint8)
             return self._to_tensor(stack), label
 
         if box is not None:
@@ -411,13 +433,17 @@ class MoveDiffDataset(Dataset):
             if x2 - x1 >= 8 and y2 - y1 >= 8:
                 imgs = [i[y1:y2, x1:x2] for i in imgs]
 
-        stack = build_diff_stack(imgs)
+        stack = self.enc.fn(imgs, IMG_SIZE)
 
         # Augmentation
         if self.augment:
-            # Horizontal flip: remap label through the mode's flip map
+            # Horizontal flip: remap label through the mode's flip map, and
+            # let the encoding correct its own pixels if they are signed
+            # vectors rather than intensities (see Encoding.flip_fixup).
             if random.random() < 0.5:
                 stack = np.fliplr(stack).copy()
+                if self.enc.flip_fixup is not None:
+                    stack = self.enc.flip_fixup(stack)
                 label = self.flip_map[label]
 
             # Small random shift + scale: breaks residual "exact pixel
@@ -430,9 +456,18 @@ class MoveDiffDataset(Dataset):
         return self._to_tensor(stack), label
 
     def _jitter(self, img: np.ndarray) -> np.ndarray:
-        """Random brightness and contrast adjustment."""
-        alpha = random.uniform(0.8, 1.2)    # contrast
-        beta  = random.randint(-15, 15)     # brightness
+        """
+        Random brightness and contrast adjustment.
+
+        The brightness offset is only applied to encodings whose pixel
+        values are still photometric (diffs, luma). The chroma encodings
+        have already normalised motion energy per sample and put the
+        background at 0 — adding a constant there would not simulate a
+        lighting change, it would wash a fake haze of "motion" over
+        genuinely static pixels and undo the encoding's whole point.
+        """
+        alpha = random.uniform(0.8, 1.2)    # contrast / gain
+        beta  = random.randint(-15, 15) if self.enc.photometric else 0
         img   = np.clip(img.astype(np.float32) * alpha + beta, 0, 255)
         return img.astype(np.uint8)
 
@@ -440,7 +475,8 @@ class MoveDiffDataset(Dataset):
         """
         Random translation (±8%) and scale (0.9-1.1), identical across
         all channels so temporal structure is preserved. Border fills
-        with 128 — the diff stack's no-motion neutral.
+        with the encoding's no-motion neutral (128 for diffs and luma,
+        0 for the chroma encodings).
         """
         h, w = img.shape[:2]
         s    = random.uniform(0.9, 1.1)
@@ -448,16 +484,20 @@ class MoveDiffDataset(Dataset):
         ty   = random.uniform(-0.08, 0.08) * h
         M = np.float32([[s, 0, tx + (1 - s) * w / 2],
                         [0, s, ty + (1 - s) * h / 2]])
-        # warpAffine handles at most 4 channels — warp per 3-channel diff
+        # warpAffine handles at most 4 channels — warp in chunks. Chunk
+        # size 4 rather than 3 so the flow encodings' 2-channel (u, v)
+        # groups never get split across two warps.
+        n = self.enc.neutral
         out = np.empty_like(img)
-        for k in range(img.shape[2] // 3):
-            out[:, :, 3*k:3*k+3] = cv2.warpAffine(
-                img[:, :, 3*k:3*k+3], M, (w, h),
-                borderMode=cv2.BORDER_CONSTANT, borderValue=(128, 128, 128))
+        for c in range(0, img.shape[2], 4):
+            sl = slice(c, min(c + 4, img.shape[2]))
+            out[:, :, sl] = cv2.warpAffine(
+                img[:, :, sl], M, (w, h),
+                borderMode=cv2.BORDER_CONSTANT, borderValue=(n, n, n, n))
         return out
 
     def _to_tensor(self, img: np.ndarray) -> torch.Tensor:
-        """HWC uint8 (3K channels) → CHW float32, ImageNet stats per diff."""
+        """HWC uint8 (3K channels) → CHW float32, ImageNet stats per group."""
         return stack_to_tensor(img)
 
     def class_counts(self) -> dict[int, int]:
@@ -653,27 +693,25 @@ def report_crops(ds: "MoveDiffDataset", allow_mixed: bool = False,
     return regime
 
 
-def build_diff_stack(frames_bgr: list[np.ndarray]) -> np.ndarray:
-    """
-    N ordered BGR frames → HWC uint8 stack of N-1 consecutive signed
-    diffs (RGB each), 128 = no change. Channel order = temporal order.
-    """
-    resized = [cv2.resize(f, (IMG_SIZE, IMG_SIZE)).astype(np.int16)
-               for f in frames_bgr]
-    diffs = []
-    for a, b in zip(resized, resized[1:]):
-        d = np.clip(b - a + 128, 0, 255).astype(np.uint8)
-        diffs.append(cv2.cvtColor(d, cv2.COLOR_BGR2RGB))
-    return np.concatenate(diffs, axis=2)
+# The encoders themselves live in encodings_move.py; these names stay here
+# because other modules already import them from this one.
+build_diff_stack = ENCODINGS["diffstack"].fn
+stack_to_tensor  = to_tensor
 
 
-def stack_to_tensor(img: np.ndarray) -> torch.Tensor:
-    """HWC uint8 (3K channels) → CHW float32 normalised, stats tiled ×K."""
-    k = img.shape[2] // 3
-    t = torch.from_numpy(img.transpose(2, 0, 1)).float() / 255.0
-    mean = torch.tensor([0.485, 0.456, 0.406]).repeat(k).view(-1, 1, 1)
-    std  = torch.tensor([0.229, 0.224, 0.225]).repeat(k).view(-1, 1, 1)
-    return (t - mean) / std
+def ckpt_encoding(ckpt: dict) -> str:
+    """
+    Which encoding a checkpoint's weights read.
+
+    Checkpoints written before encodings existed have no `encoding` field;
+    they are all diffstack, at whatever `num_diffs` they recorded. Guessing
+    is safe here precisely because it is not a guess — there was only one
+    representation before this field existed.
+    """
+    name = ckpt.get("encoding")
+    if name:
+        return name
+    return "diffstack" if ckpt.get("num_diffs", 1) > 1 else "diffstack1"
 
 
 # ---------------------------------------------------------------------------
@@ -681,27 +719,43 @@ def stack_to_tensor(img: np.ndarray) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 def build_model(device: torch.device, num_diffs: int = NUM_DIFFS,
-                dropout: float = 0.4) -> nn.Module:
+                dropout: float = 0.4,
+                in_channels: int | None = None) -> nn.Module:
     """
     ResNet-18 pretrained on ImageNet, final layer replaced for 12 classes.
     All layers unfrozen — fine-tune the whole network.
     The pretrained features (edges, textures, shapes) transfer well
     to motion-blur patterns in the diff images.
 
-    For num_diffs > 1 the first conv is inflated to 3*num_diffs input
-    channels by tiling the pretrained RGB kernels and dividing by
-    num_diffs, so initial activation magnitudes match the pretrained
-    network (standard channel-inflation trick from two-stream/I3D work).
+    `in_channels` is what the chosen encoding produces (defaults to
+    3*num_diffs for the legacy diffstack path). Above 3, the first conv is
+    inflated by tiling the pretrained RGB kernels and dividing by the
+    number of copies, so initial activation magnitudes match the
+    pretrained network (standard channel-inflation trick from
+    two-stream/I3D work). At exactly 3 nothing is inflated and conv1 is
+    used exactly as pretrained — one of the reasons to want a 3-channel
+    encoding in the first place.
     """
     model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
 
-    if num_diffs > 1:
+    if in_channels is None:
+        in_channels = 3 * num_diffs
+
+    if in_channels != 3:
+        # Tile the pretrained RGB kernels up to in_channels and truncate.
+        # Counts that are not a multiple of 3 (the flow encodings are 2 per
+        # frame pair) are fine: the scale factor is 3/in_channels either
+        # way, which is what keeps the initial activation magnitude equal
+        # to the pretrained network's regardless of how the last partial
+        # copy lands.
+        reps = -(-in_channels // 3)                      # ceil
         old = model.conv1
-        new = nn.Conv2d(3 * num_diffs, old.out_channels,
+        new = nn.Conv2d(in_channels, old.out_channels,
                         kernel_size=old.kernel_size, stride=old.stride,
                         padding=old.padding, bias=False)
         with torch.no_grad():
-            new.weight.copy_(old.weight.repeat(1, num_diffs, 1, 1) / num_diffs)
+            tiled = old.weight.repeat(1, reps, 1, 1)[:, :in_channels]
+            new.weight.copy_(tiled * (3.0 / in_channels))
         model.conv1 = new
 
     model.fc = nn.Sequential(
@@ -740,14 +794,19 @@ def train(args):
     print(f"  Move Classifier — Training")
     print(f"{'='*55}")
     print(f"  Sessions:  {len(session_dirs)}")
-    print(f"  Input:     {args.diffs} ordered diff(s) = {3*args.diffs} channels")
     print(f"  Labels:    {args.labels} "
           f"({'camera-relative layer' if args.labels == 'wca' else 'cube-relative color'})")
 
     # Build dataset
     full_ds = MoveDiffDataset(session_dirs, augment=True, num_diffs=args.diffs,
                               label_mode=args.labels,
-                              anchor_jitter=args.anchor_jitter)
+                              anchor_jitter=args.anchor_jitter,
+                              encoding=args.encoding)
+    enc = full_ds.enc
+    print(f"  Encoding:  {enc.name} — {enc.blurb}")
+    print(f"  Input:     {enc.frames} window frame(s) → "
+          f"{enc.channels} channels"
+          f"{' (conv1 pretrained as-is)' if enc.channels == 3 else ' (conv1 inflated)'}")
     if len(full_ds) == 0:
         sys.exit("No valid samples found. Run postprocess_session.py first.")
 
@@ -799,7 +858,8 @@ def train(args):
     train_ds = Subset(full_ds, train_idx)
     val_ds   = Subset(MoveDiffDataset(session_dirs, augment=False,
                                       num_diffs=args.diffs,
-                                      label_mode=args.labels), val_idx)
+                                      label_mode=args.labels,
+                                      encoding=args.encoding), val_idx)
 
     # Weighted sampler — oversample rare classes in each batch
     sample_weights = full_ds.class_weights()
@@ -807,10 +867,19 @@ def train(args):
                       for i in train_idx]
     sampler = WeightedRandomSampler(train_weights, len(train_weights))
 
+    # Loader workers. Every sample decodes 5 JPEGs and encodes them; with a
+    # single-process loader that is ~4 min/epoch with the GPU sitting at 0%
+    # utilisation — the model is not the bottleneck, the input pipeline is.
+    # Default stays 0 so nothing about previously reported runs changes
+    # silently; the sweep passes --workers.
+    loader_kw = dict(num_workers=args.workers)
+    if args.workers > 0:
+        loader_kw.update(persistent_workers=True, prefetch_factor=4)
+
     train_loader = DataLoader(train_ds, batch_size=args.batch,
-                              sampler=sampler, num_workers=0, pin_memory=True)
+                              sampler=sampler, pin_memory=True, **loader_kw)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch,
-                              shuffle=False, num_workers=0)
+                              shuffle=False, **loader_kw)
 
     print(f"\n  Train: {len(train_ds)}  Val: {len(val_ds)}")
     print(f"  Batch: {args.batch}  Epochs: {args.epochs}")
@@ -825,7 +894,8 @@ def train(args):
 
     # Model, loss, optimiser
     model     = build_model(device, num_diffs=args.diffs,
-                            dropout=args.dropout)
+                            dropout=args.dropout,
+                            in_channels=enc.channels)
     # Weighted cross-entropy handles class imbalance in the loss
     criterion = nn.CrossEntropyLoss(
         weight=full_ds.class_weights().to(device)
@@ -894,6 +964,11 @@ def train(args):
                 "class_names":class_names,
                 "label_mode":args.labels,
                 "num_diffs": args.diffs,
+                # Which representation these weights read. Same contract as
+                # crop_regime below: an encoding mismatch at inference is
+                # not a graceful degradation, it is a different input space.
+                "encoding":  enc.name,
+                "in_channels": enc.channels,
                 "dropout":   args.dropout,
                 "holdout":   args.holdout,
                 "val_session_names": held_out,
@@ -1017,9 +1092,10 @@ def evaluate(args):
     num_diffs   = ckpt.get("num_diffs", 1)  # pre-stack checkpoints were 1-diff
     label_mode  = ckpt.get("label_mode", "ble")  # pre-wca checkpoints
     class_names = ckpt.get("class_names", LABEL_MODES[label_mode][0])
+    encoding    = ckpt_encoding(ckpt)
 
     full_ds = MoveDiffDataset(session_dirs, augment=False, num_diffs=num_diffs,
-                              label_mode=label_mode)
+                              label_mode=label_mode, encoding=encoding)
     if len(full_ds) == 0:
         sys.exit("No samples found.")
 
@@ -1051,10 +1127,12 @@ def evaluate(args):
     val_ds  = Subset(full_ds, val_idx)
     loader  = DataLoader(val_ds, batch_size=args.batch, shuffle=False, num_workers=0)
 
-    model = build_model(device, num_diffs=num_diffs)
+    model = build_model(device, num_diffs=num_diffs,
+                        in_channels=full_ds.enc.channels)
     _load_state(model, ckpt["state_dict"])
     print(f"\nLoaded model from {args.model}  (epoch {ckpt['epoch']}, "
-          f"{num_diffs}-diff input, {label_mode} labels, "
+          f"{full_ds.enc.name} encoding / {full_ds.enc.channels}ch, "
+          f"{label_mode} labels, "
           f"val_acc={ckpt['val_acc']:.1f}% at save time)")
 
     _check_eval_crops(full_ds, val_idx, ckpt, args)
@@ -1088,22 +1166,26 @@ _inference_names  = CLASS_NAMES
 # compares checkpoints in a single run.
 _inference_path   = None
 _inference_crop   = None
+_inference_enc    = get_encoding(DEFAULT_ENCODING)
 
 
 def load_for_inference(model_path: str = MODEL_PATH):
     """Load the trained model for use in a live pipeline."""
     global _inference_model, _inference_device, _inference_diffs, \
-           _inference_names, _inference_path, _inference_crop
+           _inference_names, _inference_path, _inference_crop, _inference_enc
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt   = torch.load(model_path, map_location=device)
     num_diffs  = ckpt.get("num_diffs", 1)  # pre-stack checkpoints were 1-diff
     label_mode = ckpt.get("label_mode", "ble")
-    model  = build_model(device, num_diffs=num_diffs)
+    enc    = get_encoding(ckpt_encoding(ckpt))
+    model  = build_model(device, num_diffs=num_diffs,
+                         in_channels=enc.channels)
     _load_state(model, ckpt["state_dict"])
     model.eval()
     _inference_model  = model
     _inference_device = device
     _inference_diffs  = num_diffs
+    _inference_enc    = enc
     _inference_names  = ckpt.get("class_names", LABEL_MODES[label_mode][0])
     _inference_path   = str(model_path)
     _inference_crop   = ckpt.get("crop_regime")
@@ -1151,7 +1233,7 @@ def predict_probs(frames_bgr: list[np.ndarray],
     if _inference_model is None or _inference_path != str(model_path):
         load_for_inference(model_path)
 
-    need = _inference_diffs + 1
+    need = _inference_enc.frames
     n    = len(frames_bgr)
     if n < 2:
         raise ValueError("predict() needs at least 2 frames in temporal order")
@@ -1160,7 +1242,7 @@ def predict_probs(frames_bgr: list[np.ndarray],
     idxs   = [round(i * (n - 1) / (need - 1)) for i in range(need)]
     frames = [frames_bgr[i] for i in idxs]
 
-    t = stack_to_tensor(build_diff_stack(frames))
+    t = to_tensor(_inference_enc.fn(frames, IMG_SIZE))
     t = t.unsqueeze(0).to(_inference_device)
 
     with torch.no_grad():
@@ -1202,6 +1284,15 @@ if __name__ == "__main__":
     parser.add_argument("--diffs",   type=int,   default=NUM_DIFFS, choices=[1, 4],
                         help="Ordered diffs per sample: 4 = full-window stack "
                              "(default), 1 = legacy single diff (ablation)")
+    parser.add_argument("--encoding", type=str, default=DEFAULT_ENCODING,
+                        choices=sorted(ENCODINGS),
+                        help="How the move window becomes network input. "
+                             "diffstack (default) = 4 signed diffs as 12 "
+                             "channels; rgbtime/chroma/chroma8 = 3-channel "
+                             "encodings that put temporal order in COLOUR "
+                             "so conv1 stays pretrained. See "
+                             "encodings_move.py. Recorded in the checkpoint "
+                             "and re-applied at inference.")
     parser.add_argument("--labels",  type=str,   default="wca",
                         choices=["wca", "ble"],
                         help="Label target: wca = camera-relative layer "
@@ -1243,6 +1334,22 @@ if __name__ == "__main__":
                              "to fix it at inference (tried, p=0.40). Needs "
                              "raw frames/; sessions without it keep the "
                              "fixed window.")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Seed torch/numpy/random for a reproducible "
+                             "run. Left unset by default (historical "
+                             "behaviour). Worth setting: two runs of the "
+                             "SAME recipe differed by 2.3 points end-to-end "
+                             "on 2026-07-27, which is larger than most "
+                             "effects being tested here — quote an "
+                             "intervention against at least two seeds.")
+    parser.add_argument("--workers", type=int, default=0,
+                        help="DataLoader worker processes. 0 (default) "
+                             "keeps the historical single-process loader. "
+                             "Training here is input-bound, not "
+                             "compute-bound — each sample decodes 5 JPEGs "
+                             "— so raising this is what actually keeps the "
+                             "GPU fed. Does not change what is trained, "
+                             "only how fast the batches arrive.")
     parser.add_argument("--dropout", type=float, default=0.4,
                         help="Dropout before the classifier head")
     parser.add_argument("--weight-decay", type=float, default=1e-2,
@@ -1257,6 +1364,12 @@ if __name__ == "__main__":
     parser.add_argument("--model",   type=str,   default=MODEL_PATH,
                         help="Model to evaluate (used with --eval)")
     args = parser.parse_args()
+
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
 
     if args.eval:
         evaluate(args)
