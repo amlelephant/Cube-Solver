@@ -431,19 +431,41 @@ Evolve `move_detector/model.py`, don't replace it:
   yet after one architecture iteration is not a surprising result; the
   trend is the strongest ever measured toward it.
 
-  **Not yet done, in priority order:** (1) a live capture bridge so the
-  literal 73.2% ship-gate comparison can run — the number above is
-  recorded-session decode-level, not live; (2) more honest-holdout
-  sessions or a second cross-environment holdout to get more than 4
-  data points on the claim that matters most; (3) Stage B (capacity)
-  is very likely NOT needed yet given how far ALL-sessions numbers moved
-  with a 0.59M-param model — re-assess only after (1) and (2).
+  **Live capture bridge: BUILT 2026-07-28, not yet human-tested.**
+  `verify_solve.py --joint [--joint-model move_joint_seed0.pt]` swaps the
+  live analysis step for `joint_decode.analyse_joint_live` (colour crop
+  stream via `prepare_data.build_color_stream`, `score_stream_joint`,
+  `posteriorgram_to_moves`) — everything else (scramble generation,
+  phase1/phase2 flow, `verify_claim`, the falsifiability sweep, `--ble`
+  ground truth) is untouched, since it only ever consumed the `moves`
+  list format, unchanged here. `--joint --session` is refused with a
+  pointer to `verify_joint.py` (offline replay isn't wired through this
+  path — no reason to duplicate it). Validated end-to-end (crop → colour
+  stream → model → move sequence → confidence report) by replaying a
+  recorded session's raw frames through `analyse_joint_live` exactly as
+  live capture would feed it, with no webcam involved — this is the
+  furthest the pipeline can be exercised without a physical camera/cube
+  in hand, and it ran clean. **What it has NOT been checked against**:
+  a real webcam, a real cube, real lighting, or the literal 73.2%
+  ship-gate number — that first live run **is** the check, and it should
+  be run before trusting `--joint` beyond curiosity. The deployed
+  path (`verify_solve.py` without `--joint`) is completely unaffected —
+  same models, same code, byte-identical behaviour.
+
+  **Not yet done, in priority order:** (1) an actual live human test
+  session with `--joint` (mandatory before any live-metric claim); (2)
+  more honest-holdout sessions or a second cross-environment holdout to
+  get more than 4 data points on the claim that matters most; (3) Stage
+  B (capacity) is very likely NOT needed yet given how far ALL-sessions
+  numbers moved with a 0.59M-param model — re-assess only after (1) and
+  (2).
   Reproduce: `python prepare_data.py --sessions ../training_data/solve_*/
   --color`, `python train_joint.py --sessions ../training_data/solve_*/
   --val-session-names solve_20260721_102711 solve_20260722_101225
   solve_20260723_105530_solve solve_20260724_100120_solve --seed 0
   --output move_joint_seed0.pt`, `python verify_joint.py --model
-  move_joint_seed0.pt --sessions ../training_data/solve_*/`.
+  move_joint_seed0.pt --sessions ../training_data/solve_*/`, `python
+  verify_solve.py --joint` for a live test.
 
 ### Stage B — capacity, only if Stage A is limited by it
 

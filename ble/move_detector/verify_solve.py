@@ -479,6 +479,44 @@ def load_stack(args):
     return detector, det_model, device, threshold, min_sep
 
 
+def load_joint_stack(args):
+    """
+    --joint: load Stage A's single joint onset+class model instead of the
+    deployed detector+classifier pair (MODEL_REWORK_PLAN.md). Returns the
+    same 5-tuple shape as load_stack so run_live/_run_live need no
+    branching beyond which loader they call.
+    """
+    import torch
+    from model import build_joint_model
+    from crop_utils import load_detector
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ckpt = torch.load(args.joint_model, map_location=device)
+    model = build_joint_model(device, in_channels=ckpt.get("in_channels", 4),
+                              n_classes=ckpt.get("n_classes", 13))
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
+    threshold = args.threshold if args.threshold is not None \
+        else ckpt.get("threshold", 0.5)
+    min_sep = args.min_sep if args.min_sep is not None \
+        else ckpt.get("min_sep", MIN_SEP)
+
+    print(f"\n  Joint model: {args.joint_model}  (epoch {ckpt.get('epoch','?')}, "
+          f"seed {ckpt.get('seed','?')}, threshold {threshold}, "
+          f"min_sep {min_sep})")
+    print(f"  Val (at save): F1 {ckpt.get('val_f1',0)*100:.1f}%, at_onset "
+          f"{ckpt.get('val_at_onset',0)*100:.1f}%, held out "
+          f"{ckpt.get('val_session_names', [])}")
+    print(f"  Device:      "
+          f"{torch.cuda.get_device_name(0) if device.type=='cuda' else 'CPU'}")
+
+    detector = load_detector()
+    if detector is None:
+        print(f"  WARNING: cube detector unavailable — falling back to "
+              f"centered square crops.")
+    return detector, model, device, threshold, min_sep
+
+
 # ---------------------------------------------------------------------------
 # Live mode
 # ---------------------------------------------------------------------------
@@ -656,7 +694,7 @@ def record_phase(args, title, instructions, overlay=None, truth=None,
 
 
 def run_live(args, tables):
-    stack = load_stack(args)
+    stack = load_joint_stack(args) if args.joint else load_stack(args)
     detector, det_model, device, threshold, min_sep = stack
     truth = connect_truth(args)
     try:
@@ -691,10 +729,16 @@ def _run_live(args, tables, stack, truth):
     def analyse(src, label):
         load_color, n, fps, _window, ftimes = src
         print(f"\n  analysing {n} frames...")
-        res = LD.analyse(load_color, n, fps, detector, det_model, device,
-                         threshold, min_sep, args.classifier,
-                         frame_times=ftimes,
-                         peak_threshold=args.candidate_threshold)
+        if args.joint:
+            import joint_decode as JD
+            res = JD.analyse_joint_live(load_color, n, fps, detector,
+                                        det_model, device, threshold,
+                                        min_sep)
+        else:
+            res = LD.analyse(load_color, n, fps, detector, det_model, device,
+                             threshold, min_sep, args.classifier,
+                             frame_times=ftimes,
+                             peak_threshold=args.candidate_threshold)
         if not res["moves"]:
             print(f"  No moves detected in the {label} — nothing to verify.")
             return None
@@ -1043,6 +1087,14 @@ def main():
                         "ground truth instead of the webcam (globs ok)")
     p.add_argument("--detector", type=str, default=LD.DETECTOR_PATH)
     p.add_argument("--classifier", type=str, default=LD.CLASSIFIER_PATH)
+    p.add_argument("--joint", action="store_true",
+                   help="Use Stage A's joint onset+class model "
+                        "(MODEL_REWORK_PLAN.md) instead of the deployed "
+                        "detector+classifier pair. Prototype, offline-"
+                        "measured only so far — see MODEL_REWORK_PLAN.md "
+                        "for what that does and does not cover.")
+    p.add_argument("--joint-model", type=str, default="move_joint_seed0.pt",
+                   help="Checkpoint to use with --joint")
     p.add_argument("--camera", type=int, default=0)
     p.add_argument("--scramble", type=int, default=20,
                    help="Length of the prescribed scramble (default 20)")
@@ -1117,6 +1169,12 @@ def main():
                    help="--bidir: try meet points at n/3, n/2, 2n/3 and "
                         "keep the cheapest solved result")
     args = p.parse_args()
+
+    if args.joint and args.session:
+        sys.exit("--joint --session isn't wired — run_session() still "
+                 "replays through the deployed detector+classifier. Use "
+                 "verify_joint.py for offline/recorded-session evaluation "
+                 "of the joint model; --joint here is for live capture only.")
 
     tables = RC.build_tables()          # before any prompting, not mid-take
     if args.session:

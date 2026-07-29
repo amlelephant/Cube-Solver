@@ -22,6 +22,7 @@ inventories cannot occur because there is no window.
 """
 
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -29,12 +30,13 @@ import numpy as np
 from decode import peak_pick, MIN_SEP
 from reconstruct import WCA12
 from model import score_stream_joint
-from dataset import JointSessionStream
+from dataset import JointArrayStream, JointSessionStream
 
 
 def posteriorgram_to_moves(onset_prob: np.ndarray, class_prob: np.ndarray,
                           threshold: float = 0.5,
-                          min_sep: int = MIN_SEP) -> list[dict]:
+                          min_sep: int = MIN_SEP,
+                          fps: float = 30.0) -> list[dict]:
     """
     (T,) onset_prob, (T, 13) class_prob -> a moves list.
 
@@ -45,6 +47,10 @@ def posteriorgram_to_moves(onset_prob: np.ndarray, class_prob: np.ndarray,
     distribution attached to each candidate is drawn from the class head,
     so the peak and the distribution it carries come from the same source
     rather than mixing two different heads' beliefs.
+
+    `fps` only feeds the "time" field (seconds from stream start) that
+    live_detect.print_sequence reads on low-confidence moves — cosmetic,
+    not consumed by the decoder.
     """
     fg = 1.0 - class_prob[:, 12]
     onsets = peak_pick(fg, threshold=threshold, min_sep=min_sep)
@@ -55,8 +61,8 @@ def posteriorgram_to_moves(onset_prob: np.ndarray, class_prob: np.ndarray,
         total = row.sum()
         probs = (row / total) if total > 1e-9 else np.full(12, 1 / 12)
         cls = int(np.argmax(probs))
-        moves.append({"frame": int(o), "move": WCA12[cls],
-                      "conf": float(probs[cls]),
+        moves.append({"frame": int(o), "time": float(o) / fps,
+                      "move": WCA12[cls], "conf": float(probs[cls]),
                       "probs": [float(p) for p in probs],
                       "score": float(fg[int(o)])})
     return moves
@@ -94,7 +100,8 @@ def load_joint_replay(session_dir: Path, model, device, sigma: float = 1.0,
     onset_prob, class_prob = score_stream_joint(model, stream, device)
     threshold = 0.5 if threshold is None else threshold
     min_sep = MIN_SEP if min_sep is None else min_sep
-    moves = posteriorgram_to_moves(onset_prob, class_prob, threshold, min_sep)
+    moves = posteriorgram_to_moves(onset_prob, class_prob, threshold, min_sep,
+                                   fps=stream.fps)
 
     out = {"moves": moves, "onset_idx": stream.onset_idx.tolist(),
           "onset_class": stream.onset_class.tolist(), "fps": stream.fps,
@@ -102,3 +109,47 @@ def load_joint_replay(session_dir: Path, model, device, sigma: float = 1.0,
     if cache:
         cache_path.write_text(json.dumps(out))
     return {**out, "class_names": WCA12}
+
+
+def analyse_joint_live(load_color, n_frames: int, fps: float, detector,
+                       model, device, threshold: float, min_sep: int,
+                       verbose: bool = True) -> dict:
+    """
+    Live counterpart of live_detect.analyse() for the joint model: same
+    capture -> crop -> score -> peak-pick shape verify_solve.py already
+    drives, but ONE model instead of a detector+classifier pair, and
+    colour input instead of grayscale. Returns the same
+    {"moves": [...], "class_names": WCA12} shape live_detect.analyse()
+    does, so verify_solve.py's downstream code (costs_from_moves,
+    verify_claim, falsifiability_sweep, print_sequence) is unchanged.
+    """
+    from prepare_data import per_frame_boxes, build_color_stream, center_square
+
+    t0 = time.time()
+    if detector is not None:
+        boxes, n_det = per_frame_boxes(detector, load_color, n_frames)
+        cropped = n_det > 0
+        crop_note = (f"{n_det} cube detections -> per-frame boxes" if cropped
+                     else "cube NEVER detected -> centered square crop "
+                          "(the joint model trained on cube crops!)")
+    else:
+        probe = load_color(0)
+        boxes = np.tile(center_square(probe.shape),
+                        (n_frames, 1)).astype(np.int32)
+        cropped = False
+        crop_note = "no detector -> centered square crop"
+    if verbose:
+        print(f"  crop:   {crop_note}  ({time.time()-t0:.1f}s)")
+
+    frames = build_color_stream(load_color, boxes, n_frames)
+    stream = JointArrayStream(frames, name="live", fps=fps, sigma=1.0)
+
+    onset_prob, class_prob = score_stream_joint(model, stream, device)
+    moves = posteriorgram_to_moves(onset_prob, class_prob, threshold, min_sep,
+                                   fps=fps)
+    if verbose:
+        print(f"  joint model: {len(moves)} moves ({time.time()-t0:.1f}s total)")
+
+    return {"scores": onset_prob, "moves": moves, "boxes": boxes,
+           "class_names": WCA12, "cropped": cropped, "fps": fps,
+           "n_frames": n_frames}
