@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+
+  --color-ink: #0a0a0a;
+  --color-ink-soft: #454545;
+  --color-ink-faint: #828282;
+  --color-paper: #ffffff;
+  --color-cloud: #f7f7f7;
+  --color-mist: #ececec;
+
+  --color-cube-red: #e8352c;
+  --color-cube-orange: #ff8c1a;
+  --color-cube-yellow: #ffd41f;
+  --color-cube-green: #1fa25a;
+  --color-cube-blue: #2455e6;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
+}
+
+:root {
+  color-scheme: light;
+}
+
+.dark {
+  color-scheme: dark;
+  --color-ink: #f5f5f5;
+  --color-ink-soft: #b4b4b4;
+  --color-ink-faint: #8a8a8a;
+  --color-paper: #0a0a0a;
+  --color-cloud: #161616;
+  --color-mist: #272727;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+html,
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+}
+
+html {
+  transition: background-color 0.15s ease;
+}
+
+* {
+  border-color: var(--color-mist);
+}
+
+.cube-gradient {
+  background: conic-gradient(
+    from 200deg at 50% 50%,
+    var(--color-cube-blue),
+    var(--color-cube-green),
+    var(--color-cube-yellow),
+    var(--color-cube-orange),
+    var(--color-cube-red),
+    var(--color-cube-blue)
+  );
+}
+
+.cube-gradient-text {
+  background: linear-gradient(
+    90deg,
+    var(--color-cube-blue),
+    var(--color-cube-green),
+    var(--color-cube-yellow),
+    var(--color-cube-orange),
+    var(--color-cube-red)
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@keyframes pulse-rec {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.animate-pulse-rec {
+  animation: pulse-rec 1.4s ease-in-out infinite;
+}

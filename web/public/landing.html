@@ -56,6 +56,14 @@
     letter-spacing: -0.028em;
     line-height: 1.08;
     text-wrap: balance;
+    /* The chroma ramp lives behind the glyphs, clipped to them; the white
+       fill on top thins out as --scan opens, so the headline crosses over
+       to the same red-to-violet sweep the motion field uses. */
+    background-image: linear-gradient(94deg,
+      #ff2b3d 0%, #ff2f8a 34%, #c13ce8 68%, #7b3ff2 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: rgb(255 255 255 / calc(1 - var(--scan, 0)));
   }
   .frame p.sub {
     margin: 18px auto 0;
@@ -167,6 +175,57 @@
     color: rgba(255,255,255,.38);
   }
 
+  /* ---- detector HUD, faded in over the verification sections ---- */
+  #hud {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    opacity: 0;
+    pointer-events: none;
+    font-family: 'Geist Mono', monospace;
+    color: #d081ff;
+  }
+  #hudBox {
+    position: absolute;
+    left: 0; top: 0;
+    width: 0; height: 0;
+    will-change: transform, width, height;
+  }
+  #hudBox i {
+    position: absolute;
+    width: 15px; height: 15px;
+    border: 1px solid currentColor;
+  }
+  #hudBox i:nth-child(1) { left: -1px;  top: -1px;    border-right: 0; border-bottom: 0; }
+  #hudBox i:nth-child(2) { right: -1px; top: -1px;    border-left: 0;  border-bottom: 0; }
+  #hudBox i:nth-child(3) { left: -1px;  bottom: -1px; border-right: 0; border-top: 0; }
+  #hudBox i:nth-child(4) { right: -1px; bottom: -1px; border-left: 0;  border-top: 0; }
+  #hudBox b {
+    position: absolute;
+    left: -1px; top: -19px;
+    font-size: 9.5px;
+    font-weight: 500;
+    letter-spacing: 0.16em;
+    white-space: nowrap;
+    opacity: 0.85;
+  }
+  #hudReads {
+    position: absolute;
+    left: 3.2vw; top: 50%;
+    transform: translateY(-50%);
+    margin: 0;
+    display: grid;
+    grid-template-columns: auto auto;
+    gap: 7px 14px;
+    font-size: 9.5px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+  #hudReads dt { opacity: 0.45; }
+  #hudReads dd { margin: 0; opacity: 0.8; }
+  /* the readout stack has nowhere to go beside the headlines on narrow screens */
+  @media (max-width: 900px) { #hudReads { display: none; } }
+
   #hint {
     position: absolute;
     left: 50%; bottom: 5vh;
@@ -205,7 +264,7 @@
   /* no-WebGL2 fallback: static editorial page */
   .nogl #journey { height: auto; }
   .nogl #stage { position: static; height: auto; }
-  .nogl #gl, .nogl #hint { display: none; }
+  .nogl #gl, .nogl #hint, .nogl #hud { display: none; }
   .nogl #frames { position: static; }
   .nogl .frame {
     position: static;
@@ -220,41 +279,61 @@
   <div id="stage">
     <canvas id="gl"></canvas>
     <div id="frames">
-      <section class="frame low"  data-c="0.115"><h2>A new way to compete.</h2></section>
-      <section class="frame high" data-c="0.235">
-        <h2>Your camera becomes the judge.</h2>
-        <p class="sub">Computer vision reads all 54 stickers straight from your webcam. No smart cube required.</p>
+      <!-- Copy and running order follow the "Landing page" frame of the Cube
+           Arena Figma file (node 1:903). Its three verify-scramble / solve /
+           verify-solve cards become steps one to three here, numbered and
+           consecutive, which is what makes the pitch followable; they are also
+           exactly the frames the chroma filter covers, so it opens once and
+           closes for good before the demo card. Figma sections still carrying
+           template placeholder text (its second card pair, and the three
+           customer quotes under "Don't trust us") are left out. -->
+      <section class="frame low"  data-c="0.105"><h2>Every solve confirmed instantly.</h2></section>
+      <section class="frame high" data-c="0.225">
+        <p class="eyebrow">Step one</p>
+        <h2>Verify the scramble.</h2>
+        <p class="sub">Before the solve, scan your cube &mdash; so every race starts from a fair position.</p>
       </section>
-      <section class="frame low"  data-c="0.35">
-        <h2>Every solve verified.</h2>
-        <p class="sub">Each scramble and solve is validated mathematically. Impossible to fake.</p>
+      <section class="frame low"  data-c="0.335">
+        <p class="eyebrow">Step two</p>
+        <h2>Solve.</h2>
+        <p class="sub">You know this one.</p>
       </section>
-      <section class="frame video" data-c="0.475" data-w="0.075">
+      <section class="frame high" data-c="0.445">
+        <p class="eyebrow">Step three</p>
+        <h2>Verify the solve.</h2>
+        <p class="sub">Stop the timer and we check for cube swaps and confirm your solve instantly.</p>
+      </section>
+      <section class="frame video" data-c="0.570" data-w="0.075">
         <p class="eyebrow">Proof</p>
-        <h2>Watch it work.</h2>
+        <h2>Don&rsquo;t trust us? You don&rsquo;t have to.</h2>
         <a class="demo-card" id="demo" href="#" target="_blank" rel="noopener" aria-label="Watch the demo film">
           <span class="demo-play" aria-hidden="true"></span>
           <span class="demo-tag">Demo film &mdash; 45s</span>
           <span class="demo-soon">Filming now &mdash; join the waitlist to see it first</span>
         </a>
       </section>
-      <section class="frame high" data-c="0.60">
-        <h2>Leaderboards you can trust.</h2>
-        <p class="sub">Every time on the board is backed by a camera-verified solve. No self-reporting, no honor system.</p>
+      <section class="frame high" data-c="0.700">
+        <h2>All the data you always needed.</h2>
+        <p class="sub">Every move of every solve, recorded. Endless new data to streamline your improvement.</p>
       </section>
-      <section class="frame low"  data-c="0.70">
-        <h2>Challenge anyone.</h2>
-        <p class="sub">Verified head-to-head duels &mdash; rolling out as the arena grows.</p>
+      <section class="frame low"  data-c="0.800">
+        <h2>Specialized metrics.</h2>
+        <p class="sub">Average move speed, hesitation time, individual algorithm speeds &mdash; all previously untrackable. Watch yourself improve.</p>
       </section>
-      <section class="frame high" data-c="0.80">
-        <h2>Built for serious cubers.</h2>
-        <p class="sub">One uncut recording from scramble to solved state, with continuity checks the whole way through.</p>
-      </section>
-      <section class="frame finale" data-c="0.92" data-hold="1">
+      <section class="frame finale" data-c="0.915" data-hold="1">
         <p class="eyebrow">CubeArena</p>
         <h1>The future of competitive speedcubing.</h1>
         <a class="cta" href="mailto:aiden.m.lowery@gmail.com?subject=CubeArena%20early%20access&amp;body=Count%20me%20in%20for%20early%20access.">Request early access</a>
       </section>
+    </div>
+    <div id="hud" aria-hidden="true">
+      <div id="hudBox"><i></i><i></i><i></i><i></i><b id="hudTag">cube 0.94</b></div>
+      <dl id="hudReads">
+        <dt>motion</dt><dd>chroma &middot; 3ch</dd>
+        <dt>onset</dt><dd>delta &gt; 8.0</dd>
+        <dt>window</dt><dd>5 frames</dd>
+        <dt>energy</dt><dd id="hudState">0.00</dd>
+      </dl>
     </div>
     <div id="hint"><span>Scroll</span><i></i></div>
   </div>
@@ -440,14 +519,66 @@ out vec4 frag;
 void main(){
   vec2 uv = gl_FragCoord.xy / uRes;
   float aspect = uRes.x / uRes.y;
-  vec3 col = vec3(0.0035, 0.0035, 0.0045);
+  vec3 col = vec3(0.0018, 0.0018, 0.0024);
   vec2 pp = (uv - uPool) * vec2(aspect, 1.0);
   float pool = exp(-dot(pp, pp) * 5.5);
-  col += vec3(0.055, 0.057, 0.072) * pool;
+  /* Dimmer pool than the shadow needs to read against, so uShadA is raised to
+     compensate — the contact shadow is the only depth cue down here and it has
+     to survive the darker grade. */
+  col += vec3(0.036, 0.037, 0.047) * pool;
   vec2 sp = (uv - uShad) / max(uShadR, vec2(1e-4));
   float sh = exp(-dot(sp, sp));
   col *= 1.0 - sh * uShadA;
   frag = vec4(col, 1.0);
+}`;
+
+/* ================= motion energy =================
+   The same operation ble/encodings_move.py's `chroma` encoder runs on a
+   recorded move window, done live on consecutive rendered frames: absolute
+   luma difference, 3x3 blurred (single-pixel noise is the main thing that
+   competes with real motion), floored so a still frame reads as no motion
+   rather than being normalised up into a confident-looking image.
+
+   Output channels: R = motion energy, G = age of that motion (drives hue),
+   B = how sustained it is (drives desaturation, so a region that moves
+   throughout washes pale the way the encoder's washes toward white). */
+const MOTION_FS = `#version 300 es
+precision highp float;
+uniform sampler2D uCur, uPrev, uHist;
+uniform vec2 uRes;
+uniform float uDecay;   /* per-frame persistence, dt-corrected */
+uniform float uAge;     /* per-frame hue advance, dt-corrected */
+out vec4 frag;
+
+/* sqrt approximates the gamma the encoder's 8-bit input already carries */
+float lum(vec3 c){ return dot(sqrt(max(c, 0.0)), vec3(0.299, 0.587, 0.114)); }
+
+void main(){
+  vec2 uv = gl_FragCoord.xy / uRes;
+  vec2 px = 1.0 / uRes;
+  float d = 0.0;
+  for (int j = -1; j <= 1; j++) {
+    for (int i = -1; i <= 1; i++) {
+      vec2 o = uv + vec2(float(i), float(j)) * px;
+      d += abs(lum(texture(uCur, o).rgb) - lum(texture(uPrev, o).rgb));
+    }
+  }
+  d /= 9.0;
+
+  /* Floor, gain, then a soft knee instead of a clamp. A hard clamp pins every
+     moving pixel at 1.0 the moment the cube moves quickly, which collapses
+     the whole silhouette into one flat slab; compressing keeps the tonal
+     range so structure still reads at speed. */
+  float raw = max(d - 0.0035, 0.0) * 20.0;
+  float e = raw / (1.0 + raw);
+
+  vec3 h = texture(uHist, uv).rgb;
+  float faded = h.r * uDecay;
+  bool fresh = e > faded;
+  frag = vec4(fresh ? e : faded,
+              fresh ? 0.0 : min(h.g + uAge, 1.0),
+              fresh ? min(h.b + 0.05, 1.0) : h.b * 0.93,
+              1.0);
 }`;
 
 const BRIGHT_FS = `#version 300 es
@@ -484,11 +615,23 @@ const COMP_FS = `#version 300 es
 precision highp float;
 uniform sampler2D uScene;
 uniform sampler2D uBloom;
+uniform sampler2D uMotion;
 uniform vec2 uRes;
 uniform float uTime;
+uniform float uScan;
 out vec4 frag;
 vec3 aces(vec3 x){
   return clamp(x*(2.51*x + 0.03) / (x*(2.43*x + 0.59) + 0.14), 0.0, 1.0);
+}
+/* hue_sweep()'s time axis spans 270deg, so it runs red through green and cyan
+   to violet. The real chroma renders are dominated by the two ends of it,
+   because motion clusters at the start and end of a window — so this keeps
+   those ends and collapses the middle out. Same ramp the headlines use. */
+vec3 chromaRamp(float x){
+  const vec3 a = vec3(1.00, 0.11, 0.18);   /* oldest motion still decaying */
+  const vec3 b = vec3(1.00, 0.13, 0.55);
+  const vec3 c = vec3(0.55, 0.20, 0.98);   /* moved just now */
+  return x < 0.5 ? mix(a, b, x * 2.0) : mix(b, c, x * 2.0 - 1.0);
 }
 float grain(vec2 p){ p = fract(p*vec2(443.897, 441.423)); p += dot(p, p.yx + 19.19); return fract((p.x + p.y) * p.x); }
 void main(){
@@ -518,8 +661,23 @@ void main(){
   col *= 1.32;                                   /* exposure */
   col = aces(col);                               /* filmic / ACES-fitted */
   float v = smoothstep(1.3, 0.42, length(c) * 1.55);
-  col *= mix(0.68, 1.0, v);                      /* vignette */
+  col *= mix(0.58, 1.0, v);                      /* vignette */
   col = pow(col, vec3(1.0/2.2));
+
+  /* ---- verification sections: cross-fade to the chroma motion field ----
+     Hue is the 270deg sweep from hue_sweep(): violet is motion that just
+     happened (the end of the encoder's window), red is the oldest motion
+     still decaying (its start). Everything the cube isn't currently moving
+     falls to black, which is what "no motion" looks like in the model. */
+  if (uScan > 0.001) {
+    vec3 m = texture(uMotion, uv).rgb;
+    vec3 base = chromaRamp(1.0 - m.g);
+    /* a pixel that moved throughout washes pale, the way the encoder's
+       sustained regions wash toward white */
+    base = mix(base, vec3(1.0), m.b * 0.30);
+    col = mix(col, base * pow(m.r, 0.7), uScan);   /* CHROMA_GAMMA */
+  }
+
   col += (grain(uv * uRes * 0.5 + fract(uTime) * 100.0) - 0.5) * 0.014;  /* dither/grain */
   frag = vec4(col, 1.0);
 }`;
@@ -548,13 +706,14 @@ function makeProg(vs, fs) {
   return { p, u: uniforms };
 }
 
-let progCube, progBack, progBright, progBlur, progComp;
+let progCube, progBack, progBright, progBlur, progComp, progMotion;
 try {
   progCube = makeProg(CUBE_VS, CUBE_FS);
   progBack = makeProg(QUAD_VS, BACKDROP_FS);
   progBright = makeProg(QUAD_VS, BRIGHT_FS);
   progBlur = makeProg(QUAD_VS, BLUR_FS);
   progComp = makeProg(QUAD_VS, COMP_FS);
+  progMotion = makeProg(QUAD_VS, MOTION_FS);
 } catch (e) {
   document.documentElement.classList.add('nogl');
   return;
@@ -717,38 +876,65 @@ function mulV4(M, v) {
 /* ================= choreography ================= */
 
 /* layer turns in scroll-progress space (y-up world) */
+/* Ascending order is load-bearing — the loop below breaks on the first move
+   that hasn't started yet. Both forward turns land on the "Solve." frame, so
+   the cube is turning while the copy says to solve it and merely being looked
+   at during the two verify steps either side. */
 const MOVES = [
-  { axis: 0, coord:  1, dir:  1, s: 0.315, e: 0.375 }, // R   — "Every solve verified."
-  { axis: 1, coord:  1, dir:  1, s: 0.670, e: 0.725 }, // U   — "Challenge anyone."
-  { axis: 1, coord:  1, dir: -1, s: 0.835, e: 0.870 }, // U'  — re-solve
-  { axis: 0, coord:  1, dir: -1, s: 0.875, e: 0.915 }, // R'  — re-solve into the finale
+  { axis: 0, coord:  1, dir:  1, s: 0.296, e: 0.336 }, // R   — "Solve."
+  { axis: 1, coord:  1, dir:  1, s: 0.340, e: 0.378 }, // U   — "Solve."
+  { axis: 1, coord:  1, dir: -1, s: 0.855, e: 0.888 }, // U'  — re-solve
+  { axis: 0, coord:  1, dir: -1, s: 0.892, e: 0.925 }, // R'  — re-solve into the finale
 ];
 
 /* p, pitch(+shows top), yaw, scale, ty in vh (positive = down) */
 const KEYS = [
   [0.000, 16,  28, 1.00,   0],
   [0.050, 16,  28, 1.00,   0],
-  [0.090, 12, 112, 0.96,  -8],   /* "A new way to compete." */
-  [0.160, 12, 112, 0.96,  -8],
-  [0.200, 21, 198, 0.94,  17],   /* "Your camera becomes the judge." */
-  [0.280, 21, 198, 0.94,  17],
-  [0.315, 14, 290, 1.00,  -8],   /* "Every solve verified." (R turn) */
-  [0.395, 14, 290, 1.00,  -8],
-  [0.430, 18, 384, 0.50,  30],   /* demo film — cube small and low, beneath the card */
-  [0.545, 18, 392, 0.50,  30],
-  [0.585, 24, 470, 0.90,  15],   /* "Leaderboards you can trust." */
-  [0.645, 24, 470, 0.90,  15],
-  [0.680, 10, 558, 0.97, -10],   /* "Challenge anyone." (U turn) */
-  [0.745, 10, 558, 0.97, -10],
-  [0.780, 22, 646, 0.90,  15],   /* "Built for serious cubers." */
-  [0.845, 22, 646, 0.90,  15],
-  [0.905, 17, 744, 0.78, -13],   /* finale — cube re-solves on the way in */
-  [1.000, 17, 752, 0.77, -13],
+  [0.080, 12, 112, 0.96,  -8],   /* "Every solve confirmed instantly." */
+  [0.150, 12, 112, 0.96,  -8],
+  [0.190, 21, 198, 0.94,  17],   /* step one — "Verify the scramble." */
+  [0.265, 21, 198, 0.94,  17],
+  [0.300, 14, 290, 1.00,  -8],   /* step two — "Solve." (R then U) */
+  [0.375, 14, 290, 1.00,  -8],
+  [0.410, 22, 372, 0.92,  15],   /* step three — "Verify the solve." */
+  [0.480, 22, 380, 0.92,  15],
+  [0.510, 18, 452, 0.50,  30],   /* demo film — cube small and low, beneath the card */
+  [0.640, 18, 460, 0.50,  30],
+  [0.670, 24, 536, 0.90,  15],   /* "All the data you always needed." */
+  [0.740, 24, 536, 0.90,  15],
+  [0.775, 10, 620, 0.97, -10],   /* "Specialized metrics." */
+  [0.845, 10, 620, 0.97, -10],
+  [0.900, 17, 716, 0.78, -13],   /* finale — cube re-solves on the way in */
+  [1.000, 17, 724, 0.77, -13],
 ];
 
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
 const smooth = t => t*t*t*(t*(t*6 - 15) + 10);
 const easeIO = t => t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2;
+
+/* One window, spanning all three verification steps — "verify the scramble"
+   through "verify the solve" — and fully closed by 0.490, before the demo card
+   starts fading in at 0.495. Deliberately a single band:
+   dropping back into the motion view later in the scroll read as a relapse
+   rather than a beat. [enter, full-from, full-to, exit, amount] */
+const SCAN_BANDS = [
+  [0.170, 0.212, 0.460, 0.490, 1.00],
+];
+/* Returns [strength, ramp]: `strength` grades the render, `ramp` is the band's
+   own 0..1 progress, so the facelet counter fills to 54 on every band rather
+   than stalling at whatever that band's strength happens to be. */
+function scanAmount(p) {
+  let a = 0, r = 0;
+  for (const [i0, i1, o1, o0, amt] of SCAN_BANDS) {
+    if (p <= i0 || p >= o0) continue;
+    const t = smooth(clamp(p < i1 ? (p - i0) / (i1 - i0)
+                         : p > o1 ? (o0 - p) / (o0 - o1)
+                         : 1, 0, 1));
+    if (t * amt > a) { a = t * amt; r = t; }
+  }
+  return [a, r];
+}
 
 function camera(p) {
   let i = 0;
@@ -770,7 +956,10 @@ const sPitch = { x: 16, v: 0 }, sYaw = { x: 28, v: 0 }, sScale = { x: 1, v: 0 },
 /* ================= render state ================= */
 
 const FOV = 24 * Math.PI / 180;
-let W = 1, H = 1, dist = 10, sceneT, bloomA, bloomB;
+let W = 1, H = 1, dist = 10, bloomA, bloomB;
+/* the motion pass needs last frame's scene, so the scene target ping-pongs;
+   so does the motion field, which accumulates onto itself */
+let sceneA, sceneB, motA, motB, parity = 0;
 let target = 0, cur = 0;
 const lerpK = reduced ? 1 : 0.09;
 
@@ -788,11 +977,30 @@ function resize() {
   const vmin = Math.min(canvas.clientWidth, canvas.clientHeight);
   const frac = 0.40 * vmin / canvas.clientHeight;   /* cube ≈ 40vmin tall */
   dist = (3 * SPACING + 0.12) / (2 * Math.tan(FOV/2) * frac);
-  freeTarget(sceneT); freeTarget(bloomA); freeTarget(bloomB);
-  sceneT = makeTarget(W, H, gl.LINEAR, true);
+  freeTarget(sceneA); freeTarget(sceneB); freeTarget(bloomA); freeTarget(bloomB);
+  freeTarget(motA); freeTarget(motB);
+  sceneA = makeTarget(W, H, gl.LINEAR, true);
+  sceneB = makeTarget(W, H, gl.LINEAR, true);
   const bw = Math.max(2, W >> 2), bh = Math.max(2, H >> 2);
   bloomA = makeTarget(bw, bh, gl.LINEAR);
   bloomB = makeTarget(bw, bh, gl.LINEAR);
+  /* half res: the motion field is blobby, and it's sampled bilinearly back
+     up to full res, which softens the edges pleasantly */
+  const mw = Math.max(2, W >> 1), mh = Math.max(2, H >> 1);
+  motA = makeTarget(mw, mh, gl.LINEAR);
+  motB = makeTarget(mw, mh, gl.LINEAR);
+  clearMotion();
+}
+
+/* Blank the accumulator, so a band never opens on a field left frozen from
+   the previous one (the pass is skipped while the filter is inactive). */
+function clearMotion() {
+  gl.clearColor(0, 0, 0, 1);
+  for (const t of [motA, motB]) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fb);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
 
 function onScroll() {
@@ -819,7 +1027,64 @@ function renderFrames(p) {
   }
 }
 
-let lastNow = 0;
+/* ---- HUD: a detector box tracking the cube, plus pipeline readouts ---- */
+const framesEl = document.getElementById('frames');
+const hud = document.getElementById('hud');
+const hudBox = document.getElementById('hudBox');
+const hudTag = document.getElementById('hudTag');
+const hudState = document.getElementById('hudState');
+const HB = SPACING + 0.5;   /* cube half-extent in group-local space */
+let hudShown = -1, hudGeom = '', hudTxt = '';
+
+/**
+ * `PVG` already carries the group rotation and scale, so projecting the eight
+ * local corners and taking their screen-space extent gives the same axis-
+ * aligned box a real detector would return.
+ */
+function renderHud(scan, ramp, PVG, t) {
+  const on = Math.round(clamp(scan, 0, 1) * 100) / 100;
+  if (on !== hudShown) {
+    hud.style.opacity = on;
+    hud.style.visibility = on === 0 ? 'hidden' : 'visible';
+    framesEl.style.setProperty('--scan', on);   /* headline colour crossover */
+    hudShown = on;
+  }
+  if (on === 0) return;
+
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (let i = 0; i < 8; i++) {
+    const c = mulV4(PVG, [i & 1 ? HB : -HB, i & 2 ? HB : -HB, i & 4 ? HB : -HB, 1]);
+    const sx = (c[0] / c[3] * 0.5 + 0.5) * canvas.clientWidth;
+    const sy = (0.5 - c[1] / c[3] * 0.5) * canvas.clientHeight;
+    if (sx < x0) x0 = sx;
+    if (sy < y0) y0 = sy;
+    if (sx > x1) x1 = sx;
+    if (sy > y1) y1 = sy;
+  }
+  /* snap to 2px: a tracked box quantises, it doesn't glide */
+  const pad = 14;
+  const q = v => Math.round((v) * 0.5) * 2;
+  const geom = `${q(x0 - pad)},${q(y0 - pad)},${q(x1 - x0 + pad * 2)},${q(y1 - y0 + pad * 2)}`;
+  if (geom !== hudGeom) {
+    const [gx, gy, gw, gh] = geom.split(',');
+    hudBox.style.transform = `translate(${gx}px, ${gy}px)`;
+    hudBox.style.width = gw + 'px';
+    hudBox.style.height = gh + 'px';
+    hudGeom = geom;
+  }
+
+  /* confidence wobbles like a live score; energy is the band's own ramp */
+  const conf = reduced ? 0.94 : 0.93 + Math.sin(t * 1.3) * 0.035;
+  const txt = conf.toFixed(2) + '|' + Math.min(1, ramp / 0.9).toFixed(2);
+  if (txt !== hudTxt) {
+    const [c, e] = txt.split('|');
+    hudTag.textContent = 'cube ' + c;
+    hudState.textContent = e;
+    hudTxt = txt;
+  }
+}
+
+let lastNow = 0, wasScanning = false;
 function tick(now) {
   const dt = clamp((now - lastNow) / 1000, 0.001, 0.033);
   lastNow = now;
@@ -827,6 +1092,7 @@ function tick(now) {
   cur += (target - cur) * lerpK;
   if (Math.abs(target - cur) < 0.00005) cur = target;
 
+  const [scan, scanRamp] = scanAmount(cur);
   const [kp, ky, ks, kty] = camera(cur);
   let pitch, yaw, scl, tyv;
   if (reduced) { pitch = kp; yaw = ky; scl = ks; tyv = kty; }
@@ -837,8 +1103,13 @@ function tick(now) {
     tyv   = spring(sTy,    kty, dt, 5.2, 0.96);
   }
   const t = now / 1000;
-  const aPitch = reduced ? 0 : Math.sin(t * 0.50) * 1.1;
-  const aYaw   = reduced ? 0 : Math.sin(t * 0.33 + 1.7) * 1.5;
+  /* The ambient sway grows with the filter: a motion view of a still cube is
+     an empty black frame, so the verification sections need something to
+     visualise once the reader stops scrolling. It's an oscillation rather
+     than a drift so it returns to zero and the band can close cleanly. */
+  const wob = 1 + scan * 6;
+  const aPitch = reduced ? 0 : Math.sin(t * 0.50) * 1.1 * wob;
+  const aYaw   = reduced ? 0 : Math.sin(t * 0.33 + 1.7) * 1.5 * wob;
   const bob    = reduced ? 0 : Math.sin(t * 0.62) * 0.055;
 
   /* world placement: cube optical centre sits at 45vh + keyframe offset */
@@ -876,6 +1147,14 @@ function tick(now) {
   }
 
   /* ---- scene pass ---- */
+  parity ^= 1;
+  const sceneT = parity ? sceneA : sceneB;
+  const scenePrev = parity ? sceneB : sceneA;
+  const motT = parity ? motA : motB;
+  const motPrev = parity ? motB : motA;
+  if (scan > 0.001 && !wasScanning) clearMotion();
+  wasScanning = scan > 0.001;
+
   gl.bindFramebuffer(gl.FRAMEBUFFER, sceneT.fb);
   gl.viewport(0, 0, W, H);
   gl.disable(gl.DEPTH_TEST);
@@ -897,7 +1176,7 @@ function tick(now) {
   gl.uniform2f(progBack.u.uPool, 0.5, clamp(bottom[1] - 0.16, 0, 1));
   gl.uniform2f(progBack.u.uShad, 0.5, clamp(shadY, 0, 1));
   gl.uniform2f(progBack.u.uShadR, cubeHalf / worldH * (H / W) * 1.5, cubeHalf / worldH * 0.42);
-  gl.uniform1f(progBack.u.uShadA, 0.62);
+  gl.uniform1f(progBack.u.uShadA, 0.74);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
   /* cubies */
@@ -932,9 +1211,30 @@ function tick(now) {
     gl.drawElements(gl.TRIANGLES, mesh.count, gl.UNSIGNED_INT, 0);
   }
 
-  /* ---- bloom ---- */
+  /* ---- motion energy (only while a verification band is open) ---- */
   gl.disable(gl.DEPTH_TEST);
   gl.bindVertexArray(quadVAO);
+  if (wasScanning) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, motT.fb);
+    gl.viewport(0, 0, motT.w, motT.h);
+    gl.useProgram(progMotion.p);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, sceneT.tex);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, scenePrev.tex);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, motPrev.tex);
+    gl.uniform1i(progMotion.u.uCur, 0);
+    gl.uniform1i(progMotion.u.uPrev, 1);
+    gl.uniform1i(progMotion.u.uHist, 2);
+    gl.uniform2f(progMotion.u.uRes, motT.w, motT.h);
+    /* dt-corrected so the trail lasts the same wall-clock time at any fps.
+       The hue sweep has to finish inside the trail's visible lifetime — set
+       longer, the energy dies while still violet and the red end never
+       appears at all. */
+    gl.uniform1f(progMotion.u.uDecay, Math.pow(0.915, dt * 60));
+    gl.uniform1f(progMotion.u.uAge, dt / 0.34);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  /* ---- bloom ---- */
   gl.activeTexture(gl.TEXTURE0);
 
   gl.bindFramebuffer(gl.FRAMEBUFFER, bloomA.fb);
@@ -970,12 +1270,17 @@ function tick(now) {
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_2D, bloomA.tex);
   gl.uniform1i(progComp.u.uBloom, 1);
+  gl.activeTexture(gl.TEXTURE2);
+  gl.bindTexture(gl.TEXTURE_2D, motT.tex);
+  gl.uniform1i(progComp.u.uMotion, 2);
   gl.uniform2f(progComp.u.uRes, W, H);
   gl.uniform1f(progComp.u.uTime, reduced ? 0 : t);
+  gl.uniform1f(progComp.u.uScan, scan);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
   /* ---- DOM ---- */
   renderFrames(cur);
+  renderHud(scan, scanRamp, mul4(PV, group), t);
   hint.style.opacity = clamp(1 - cur / 0.04, 0, 1).toFixed(2);
 
   requestAnimationFrame(tick);
