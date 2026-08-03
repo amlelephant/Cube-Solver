@@ -259,7 +259,7 @@ confirmation of why. Do not spend Stage A's first iteration tuning
 class-balance or input colour before the background/onset channel is
 solid.
 
-Reproduce: `python oracle_attribution.py --out oracle_attribution_result.json`
+Reproduce: `python oracle_attribution.py --out results/2026-07-28/oracle_attribution_result.json`
 (run from `move_detector/`; ~30–40 min on GPU, dominated by beam-16000
 retries on the `real`/`oracle-classifier` conditions that don't verify).
 
@@ -432,7 +432,7 @@ Evolve `move_detector/model.py`, don't replace it:
   trend is the strongest ever measured toward it.
 
   **Live capture bridge: BUILT 2026-07-28, not yet human-tested.**
-  `verify_solve.py --joint [--joint-model move_joint_seed0.pt]` swaps the
+  `verify_solve.py --joint [--joint-model checkpoints/move_joint_seed0.pt]` swaps the
   live analysis step for `joint_decode.analyse_joint_live` (colour crop
   stream via `prepare_data.build_color_stream`, `score_stream_joint`,
   `posteriorgram_to_moves`) — everything else (scramble generation,
@@ -463,8 +463,8 @@ Evolve `move_detector/model.py`, don't replace it:
   --color`, `python train_joint.py --sessions ../training_data/solve_*/
   --val-session-names solve_20260721_102711 solve_20260722_101225
   solve_20260723_105530_solve solve_20260724_100120_solve --seed 0
-  --output move_joint_seed0.pt`, `python verify_joint.py --model
-  move_joint_seed0.pt --sessions ../training_data/solve_*/`, `python
+  --output checkpoints/move_joint_seed0.pt`, `python verify_joint.py --model
+  checkpoints/move_joint_seed0.pt --sessions ../training_data/solve_*/`, `python
   verify_solve.py --joint` for a live test.
 
 ### Stage B — capacity, only if Stage A is limited by it
@@ -536,7 +536,7 @@ survived two different estimators.
   that a lever is eroding security while true-accept goes up.
 
   Reproduce: `python falsifiability_batch.py --sessions
-  "../training_data/solve_*/" --out falsifiability_batch_result.json`
+  "../training_data/solve_*/" --out results/2026-07-28/falsifiability_batch_result.json`
   (run from `move_detector/`; ~1 hour on GPU — dominated by beam-16000
   retries on sessions that don't verify at the default beam).
 - **Pacing prompt** (rev 2 §3a, ~1 day): "one move at a time" UX

@@ -65,12 +65,12 @@ from prepare_data import (per_frame_boxes, build_gray_stream,   # noqa: E402
 from train_move_classifier import (FRAME_ORDER, predict_probs,  # noqa: E402
                                    inference_crop_regime)
 
-# move_detector_all28.pt — 28 frame-bearing sessions (adds 20260723 and
-#                      20260724, neither of which the previous move_detector.pt
+# checkpoints/move_detector_all28.pt — 28 frame-bearing sessions (adds 20260723 and
+#                      20260724, neither of which the previous checkpoints/move_detector.pt
 #                      had ever seen), --holdout session with one name per
 #                      recording day (20260721, 20260722, 20260723, 20260724):
 #                      93.9% F1 / 95.8% recall aggregate, tuned threshold
-#                      0.25. Replaced move_detector.pt (a same-day "final fit"
+#                      0.25. Replaced checkpoints/move_detector.pt (a same-day "final fit"
 #                      on 12 sessions with no validation of its own) on
 #                      2026-07-24 after it scored only 89.8% F1 across all 16
 #                      sessions from 20260723/20260724 it had never seen.
@@ -136,7 +136,7 @@ from train_move_classifier import (FRAME_ORDER, predict_probs,  # noqa: E402
 #                      the shifted windows instead. Live anchor offsets are
 #                      ~2x wider than recorded ones (52% vs 72% exact), which
 #                      is why this shows up live and not in replay.
-DETECTOR_PATH  = "move_detector_all28.pt"
+DETECTOR_PATH  = "checkpoints/move_detector_all28.pt"
 CLASSIFIER_PATH = "../move_classifier_all39_jitter.pt"
 JPEG_QUALITY   = 85
 

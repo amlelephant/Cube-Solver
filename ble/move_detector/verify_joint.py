@@ -21,9 +21,9 @@ set:
     falsifiability_sweep, unchanged)
 
 Usage:
-    python verify_joint.py --model move_joint_seed0.pt
-    python verify_joint.py --model move_joint_seed0.pt --model2 move_joint_seed1.pt
-    python verify_joint.py --model move_joint_seed0.pt \\
+    python verify_joint.py --model checkpoints/move_joint_seed0.pt
+    python verify_joint.py --model checkpoints/move_joint_seed0.pt --model2 checkpoints/move_joint_seed1.pt
+    python verify_joint.py --model checkpoints/move_joint_seed0.pt \\
         --sessions ../training_data/solve_20260721_102711/
 """
 
@@ -38,8 +38,9 @@ import torch
 
 import reconstruct as RC
 import verify_solve as VS
-from model import build_joint_model
+from model import build_joint_from_ckpt
 from joint_decode import load_joint_replay
+from decode import onset_collisions
 
 
 def resolve_sessions(patterns: list[str]) -> list[Path]:
@@ -71,7 +72,22 @@ def decode_session(d: Path, model, device, ckpt, args, tables) -> dict | None:
                                refresh_cache=args.refresh_cache)
     if replay is None or not replay["moves"]:
         return None
+    return decode_moves(d, replay["moves"], replay["onset_idx"], ckpt, args,
+                        tables)
 
+
+def decode_moves(d: Path, moves: list, onset_idx, ckpt, args, tables
+                 ) -> dict | None:
+    """
+    The measurement itself, taking an already-produced moves list.
+
+    Split out from decode_session so that a model whose decoder is NOT
+    load_joint_replay — the CTC arm, whose moves come from a prefix beam
+    search rather than a peak picker — is scored by literally the same code
+    rather than by a parallel copy of it. Everything that could make two
+    arms incomparable (cost model, beam, retry policy, gt handling) lives
+    here, once.
+    """
     gt_records = [json.loads(l) for l in open(d / "moves.jsonl") if l.strip()]
     gt = [r.get("wca_notation") for r in gt_records]
     if not gt or any(g is None for g in gt):
@@ -83,14 +99,16 @@ def decode_session(d: Path, model, device, ckpt, args, tables) -> dict | None:
     threshold = ckpt.get("threshold", 0.5)
 
     pred_names, cost_rows, del_costs = RC.costs_from_moves(
-        replay["moves"], threshold, args.blend_inv, args.blend_unif,
+        moves, threshold, args.blend_inv, args.blend_unif,
         args.del_cost, None, args.del_floor, args.blend_adj)
 
     raw = RC.score_vs_gt(gt, pred_names)
 
     kw = dict(c_del=args.del_cost, c_ins=args.ins_cost, c_rot=args.rot_cost,
              max_end_ins=args.max_end_ins, rel_weight=args.rel_weight,
-             del_costs=del_costs, rotations=False, tables=tables)
+             del_costs=del_costs, rotations=False, tables=tables,
+             slices=args.slices, c_slice=args.c_slice,
+             slice_rows=RC.slice_rows_from_moves(moves, args.slice_gate))
     t0 = time.time()
     res = RC.decode_between(start, end, cost_rows, beam=args.beam, **kw)
     if not res["solved"] and args.retry_beam > args.beam:
@@ -99,13 +117,23 @@ def decode_session(d: Path, model, device, ckpt, args, tables) -> dict | None:
         res["retried"] = True
     dt = time.time() - t0
 
-    gtc = RC.gt_path_cost(gt, pred_names, cost_rows, del_costs, args.ins_cost)
+    gtc = RC.gt_path_cost(gt, pred_names, cost_rows, del_costs, args.ins_cost,
+                          args.slices, args.c_slice)
+    # How many of this session's ground-truth moves the peak picker was
+    # never able to report separately in the first place (decode.
+    # onset_collisions). Reported alongside the miss count so a frame-rate
+    # limit is never read as a detector regression — on four sessions in
+    # this corpus every single miss was of this kind.
+    unresolvable, crowded = onset_collisions(onset_idx)
+
     out = {"session": d.name, "n_gt": len(gt), "n_pred": len(pred_names),
           "raw_acc": raw["acc"], "raw_sub": raw["sub"], "raw_miss": raw["miss"],
           "raw_phantom": raw["phantom"], "solved": res["solved"],
+          "n_unresolvable": len(unresolvable), "n_crowded": len(crowded),
           "cost": res.get("cost"), "gt_path_cost": gtc,
           "decode_seconds": dt,
           "cost_rows": cost_rows, "del_costs": del_costs,
+          "moves_raw": moves,
           "beam_used": args.retry_beam if res.get("retried") else args.beam}
     if res["solved"]:
         rec = RC.score_vs_gt(gt, res["moves"])
@@ -120,6 +148,10 @@ def print_session(o: dict, unseen: bool):
           f"{o['n_pred']} joint-model candidates)")
     print(f"    raw     {o['raw_acc']*100:5.1f}%   ({o['raw_sub']} sub, "
           f"{o['raw_miss']} miss, {o['raw_phantom']} phantom)")
+    if o.get("n_unresolvable"):
+        print(f"    note    {o['n_unresolvable']} of {o['n_gt']} GT moves are "
+              f"unresolvable pairs (onsets closer than MIN_SEP);\n"
+              f"            at most half of each pair can ever be reported")
     if o["solved"]:
         print(f"    decode  VERIFIED  cost {o['cost']:.2f}  vs gt_path_cost "
               f"{o['gt_path_cost']:.2f}  ({o['decode_seconds']:.1f}s"
@@ -172,15 +204,25 @@ def main():
     p.add_argument("--blend-unif", type=float, default=RC.BLEND_UNIF)
     p.add_argument("--blend-adj", type=float, default=RC.BLEND_ADJ)
     p.add_argument("--rel-weight", type=float, default=RC.REL_WEIGHT)
+    p.add_argument("--slices", action="store_true",
+                   help="Let one onset decode as a middle-slice turn (two "
+                        "layer moves). Off by default = exact prior "
+                        "behaviour. See reconstruct.SLICE_PARTNER.")
+    p.add_argument("--c-slice", type=float, default=RC.C_SLICE,
+                   dest="c_slice",
+                   help="Cost of a slice reading, on top of the onset's own "
+                        "acceptance cost")
+    p.add_argument("--slice-gate", type=float, default=RC.SLICE_GATE,
+                   dest="slice_gate",
+                   help="Minimum posterior mass on both halves of a pair "
+                        "before an onset may be read as a slice")
     p.add_argument("--no-sweep", action="store_true")
     p.add_argument("--out", type=str, default=None)
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(args.model, map_location=device)
-    model = build_joint_model(device, in_channels=ckpt.get("in_channels", 4),
-                              n_classes=ckpt.get("n_classes", 13))
-    model.load_state_dict(ckpt["state_dict"])
+    model = build_joint_from_ckpt(ckpt, device)
     model.eval()
     model._ckpt_tag = f"{Path(args.model).stem}_e{ckpt['epoch']}"
 
@@ -204,11 +246,20 @@ def main():
         print_session(o, d.name in unseen_names)
 
         if o["solved"] and not args.no_sweep:
+            # slices/c_slice MUST be carried here. The sweep decodes decoy
+            # claims through the same dispatch, and a cost model that is
+            # cheaper for the true claim than for its decoys would make
+            # every verdict look better without any of them being more
+            # true. Falsifiability is only meaningful when both sides are
+            # priced identically.
             vs_args = argparse.Namespace(
                 beam=args.beam, retry_beam=args.retry_beam,
                 del_cost=args.del_cost, ins_cost=args.ins_cost,
                 rot_cost=args.rot_cost, max_end_ins=args.max_end_ins,
-                rel_weight=args.rel_weight, rotations=False, bidir=False)
+                rel_weight=args.rel_weight, rotations=False, bidir=False,
+                slices=args.slices, c_slice=args.c_slice,
+                slice_rows=RC.slice_rows_from_moves(o["moves_raw"],
+                                                    args.slice_gate))
             gt_records = [json.loads(l) for l in open(d / "moves.jsonl")
                          if l.strip()]
             gt = [r["wca_notation"] for r in gt_records]
@@ -223,7 +274,8 @@ def main():
 
     if args.out:
         clean = [{k: v for k, v in r.items()
-                 if k not in ("cost_rows", "del_costs")} for r in results]
+                 if k not in ("cost_rows", "del_costs", "moves_raw")}
+                for r in results]
         Path(args.out).write_text(json.dumps(clean, indent=2, default=str))
         print(f"\n  wrote {args.out}")
 

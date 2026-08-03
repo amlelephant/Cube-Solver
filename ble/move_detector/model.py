@@ -123,7 +123,11 @@ class OnsetDetector(nn.Module):
     """
     (B, T, C, H, W) -> (B, T) per-frame onset logits, or, with
     `n_classes` set (Stage A), a tuple ((B, T) onset logits, (B, T,
-    n_classes) class logits) from a second head sharing the same trunk.
+    n_classes) class logits) from a second head sharing the same trunk,
+    or, with `n_counts` also set, a 3-tuple additionally carrying (B, T,
+    n_counts) local-onset-count logits from a third such head. Each head
+    is additive: omitting its argument reproduces the previous model
+    exactly, weights and outputs alike.
 
     Fully convolutional in time: train on fixed-length clips, then run a
     whole session in one pass at inference (no windowing, no stitching).
@@ -131,7 +135,8 @@ class OnsetDetector(nn.Module):
 
     def __init__(self, feat_dim: int = FEAT_DIM,
                  dilations: tuple = TCN_DILATIONS, dropout: float = 0.1,
-                 in_channels: int = IN_CHANNELS, n_classes: int | None = None):
+                 in_channels: int = IN_CHANNELS, n_classes: int | None = None,
+                 n_counts: int | None = None):
         super().__init__()
         self.encoder = FrameEncoder(feat_dim, in_channels=in_channels)
         self.tcn = nn.Sequential(*[
@@ -141,6 +146,9 @@ class OnsetDetector(nn.Module):
         self.n_classes = n_classes
         self.class_head = nn.Conv1d(feat_dim, n_classes, 1) \
             if n_classes else None
+        self.n_counts = n_counts
+        self.count_head = nn.Conv1d(feat_dim, n_counts, 1) \
+            if n_counts else None
 
     @property
     def receptive_field(self) -> int:
@@ -157,7 +165,10 @@ class OnsetDetector(nn.Module):
         if self.class_head is None:
             return onset_logits
         class_logits = self.class_head(trunk).transpose(1, 2)  # (B, T, K)
-        return onset_logits, class_logits
+        if self.count_head is None:
+            return onset_logits, class_logits
+        count_logits = self.count_head(trunk).transpose(1, 2)  # (B, T, 3)
+        return onset_logits, class_logits, count_logits
 
 
 def build_model(device: torch.device, dropout: float = 0.1) -> OnsetDetector:
@@ -171,9 +182,33 @@ JOINT_N_CLASSES = 13
 
 def build_joint_model(device: torch.device, dropout: float = 0.1,
                       in_channels: int = JOINT_IN_CHANNELS,
-                      n_classes: int = JOINT_N_CLASSES) -> OnsetDetector:
+                      n_classes: int = JOINT_N_CLASSES,
+                      n_counts: int | None = None) -> OnsetDetector:
+    """`n_counts=None` reproduces the Stage A joint model exactly; pass 3
+    (dataset.COUNT_CLASSES) to add the count head. Every existing joint
+    checkpoint loads either way — the count head's weights simply are not
+    in its state_dict, so build with n_counts=None for those."""
     return OnsetDetector(dropout=dropout, in_channels=in_channels,
-                        n_classes=n_classes).to(device)
+                        n_classes=n_classes, n_counts=n_counts).to(device)
+
+
+def build_joint_from_ckpt(ckpt: dict, device: torch.device) -> OnsetDetector:
+    """
+    Build the joint model a checkpoint was actually saved from, and load it.
+
+    Every head this model has grown is optional, so the architecture is not
+    inferable from the class alone — it has to come from the checkpoint.
+    Reading it in one place keeps the four independent load sites
+    (train_joint --eval, threshold_sweep, verify_joint, verify_solve) from
+    drifting apart, which is how a pre-Stage-A checkpoint would otherwise
+    quietly fail to load the day a new head is added.
+    """
+    model = build_joint_model(device,
+                             in_channels=ckpt.get("in_channels", 4),
+                             n_classes=ckpt.get("n_classes", 13),
+                             n_counts=ckpt.get("n_counts"))
+    model.load_state_dict(ckpt["state_dict"])
+    return model
 
 
 @torch.no_grad()
@@ -218,38 +253,50 @@ def score_stream_joint(model: OnsetDetector, stream, device: torch.device,
     Stage A counterpart of score_stream for a joint (onset + class) model.
     Same chunk-with-discarded-margin construction, for the same reason.
 
-    Returns (onset_prob (T,), class_prob (T, n_classes)) — onset_prob is
-    the sigmoid onset score exactly as score_stream produces; class_prob
-    is a per-frame softmax over ALL n_classes (12 WCA quarter turns +
-    background), so its LAST column is the class head's OWN background
-    posterior — related to but not forced equal to (1 - onset_prob), since
-    the two heads share a trunk but have independent losses (see
-    dataset.build_dense_targets). Consumers decide how to combine them
-    (see joint_decode.py) rather than that choice being made here.
+    Returns (onset_prob (T,), class_prob (T, n_classes), count_prob
+    (T, n_counts) or None) — onset_prob is the sigmoid onset score exactly
+    as score_stream produces; class_prob is a per-frame softmax over ALL
+    n_classes (12 WCA quarter turns + background), so its LAST column is
+    the class head's OWN background posterior — related to but not forced
+    equal to (1 - onset_prob), since the two heads share a trunk but have
+    independent losses (see dataset.build_dense_targets). count_prob is
+    the softmax over the optional count head's {0, 1, 2+} local-onset
+    count (dataset.build_count_target), and is None on a checkpoint
+    trained without that head. Consumers decide how to combine them (see
+    joint_decode.py) rather than that choice being made here.
     """
     from dataset import to_tensor_color
 
     model.eval()
     n = len(stream)
     margin = model.receptive_field // 2
+    n_counts = getattr(model, "n_counts", None)
     onset_out = np.empty(n, dtype=np.float32)
     class_out = np.empty((n, model.n_classes), dtype=np.float32)
+    count_out = (np.empty((n, n_counts), dtype=np.float32)
+                 if n_counts else None)
 
     start = 0
     while start < n:
         end = min(start + chunk, n)
         lo, hi = max(0, start - margin), min(n, end + margin)
         x = to_tensor_color(stream.clip_block(lo, hi - lo)).unsqueeze(0).to(device)
-        onset_logits, class_logits = model(x)
-        onset_logits = onset_logits[0].float().cpu().numpy()
-        class_logits = class_logits[0].float().cpu().numpy()
+        out = model(x)
+        onset_logits = out[0][0].float().cpu().numpy()
+        class_logits = out[1][0].float().cpu().numpy()
         sl = slice(start - lo, start - lo + (end - start))
         onset_out[start:end] = onset_logits[sl]
         class_out[start:end] = class_logits[sl]
+        if count_out is not None:
+            count_out[start:end] = out[2][0].float().cpu().numpy()[sl]
         start = end
 
     onset_prob = 1.0 / (1.0 + np.exp(-onset_out))
-    m = class_out.max(axis=1, keepdims=True)
-    e = np.exp(class_out - m)
-    class_prob = e / e.sum(axis=1, keepdims=True)
-    return onset_prob, class_prob
+    class_prob = _softmax(class_out)
+    count_prob = _softmax(count_out) if count_out is not None else None
+    return onset_prob, class_prob, count_prob
+
+
+def _softmax(logits: np.ndarray) -> np.ndarray:
+    e = np.exp(logits - logits.max(axis=1, keepdims=True))
+    return e / e.sum(axis=1, keepdims=True)

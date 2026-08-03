@@ -198,6 +198,44 @@ TP_NAME = "URFDLB"
 # threshold). C_INS also carries the 12-way "which move" choice.
 C_DEL = 2.6
 C_INS = 4.0
+
+# Cost of reading ONE onset as a middle-slice turn, i.e. as TWO layer moves
+# instead of one (see SLICE_PARTNER below for why that is what a slice is).
+#
+# This is not an insertion and must not be priced like one. C_INS = 4.0 also
+# carries the 12-way "which move" choice; a slice's second move is fully
+# determined by its first, so that ~log(12) = 2.5 of the cost does not apply.
+# What remains is the prior against a slice happening at all: 40 slice pairs
+# in 4,641 recorded moves, so a slice reading should not be free either.
+# Default 1.5 sits between those two arguments; --c-slice sweeps it.
+C_SLICE = 1.5
+
+# Minimum posterior mass on BOTH halves of a pair before that onset may be
+# read as a slice at all.
+#
+# This gate is not an optimisation, it is what makes OP_SLICE usable. Allowed
+# at every onset, a slice is 12 extra near-free transitions per step; the beam
+# floods with equally-cheap nonsense and loses the true story even when the
+# true story costs almost nothing (measured directly on
+# solve_20260724_103307_solve: the intended path exists at cost 8.0 and the
+# beam misses it at width 64000).
+#
+# The signal that fixes it comes from the training-label defect itself. A
+# slice's two halves were labelled on heavily overlapping windows, so the
+# classifier learned to hedge between them, and at a slice onset the
+# posterior splits across the pair instead of concentrating. Measured
+# 2026-07-30 over 3,527 matched onsets: partner-class mass has median 0.359
+# at slice onsets against 0.00004 everywhere else — four orders of magnitude,
+# p = 2e-23. At a 0.1 gate that is 33/33 slice onsets with 12/3494 false
+# positives.
+#
+# Set to that measured operating point, NOT looser. An earlier 0.05 "for
+# margin" cost a real regression: on solve_20260728_233139_scramble the gate
+# opened at a merely UNCERTAIN onset (argmax F 0.539, partner B' 0.064) and
+# the session stopped verifying. There is no margin to buy on the recall
+# side — every observed slice onset sits at >= 0.1 with median 0.36 — so
+# loosening only ever admits false positives.
+SLICE_GATE = 0.10
 C_ROT = 2.0
 DEL_SCORE_W = 3.5    # extra deletion cost per unit of onset strength
 DEL_FLOOR = 0.3      # D1 soft-onset lattice: near-free deletion cost for a
@@ -236,7 +274,7 @@ _CO = slice(8, 16)
 _EP = slice(16, 28)
 _EO = slice(28, 40)
 
-TABLES_CACHE = Path(__file__).with_name("reconstruct_tables.npz")
+TABLES_CACHE = Path(__file__).parent / "cache" / "reconstruct_tables.npz"
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +357,53 @@ ADJ_CLASSES = [np.array([k for k in range(12)
                          if CLASS_FACE[k] != CLASS_FACE[p]
                          and CLASS_FACE[k] != (CLASS_FACE[p] + 3) % 6])
               for p in range(12)]
+
+# ---------------------------------------------------------------------------
+# Middle-slice turns
+# ---------------------------------------------------------------------------
+#
+# A slice turn (M/E/S) rotates the core, so the four centres on that axis move
+# with it. The smart cube reports face rotation RELATIVE to the core, so what
+# it emits for one M is the PAIR `R` + `L'` — the two outer layers, which did
+# not move in space, appear to have turned backwards once the core rotated
+# under them. That pair is a state-correct description of M relative to the
+# centres, which is why every session containing slices still passes
+# session_check.py's endpoint gate.
+#
+# Measured 2026-07-30 (GROUND_TRUTH_ARTIFACTS.md): 46 of 46 same-axis
+# opposite-face pairs within 200ms carry exactly this signature — one primed,
+# one not — and 31 of them share a BLE timestamp exactly. The camera sees ONE
+# motion, so the detector can only ever produce ONE onset for them, and
+# `decode.MIN_SEP` forbids two peaks that close in any case. Without the
+# OP_SLICE transition below, the second half of every slice is an insertion
+# the decoder must pay C_INS for, and that charge alone accounts for the
+# entire gt_path_cost of several sessions.
+#
+# SLICE_PARTNER[k] is the class that accompanies k: same axis, opposite face,
+# opposite handedness. The two commute (different layers about one axis), so
+# the composition is the same whichever half the classifier happens to report.
+SLICE_PARTNER = np.array([
+    WCA12.index(TP_NAME[(TP_FACE[n[0]] + 3) % 6]
+                + ("" if n.endswith("'") else "'"))
+    for n in WCA12
+])
+
+# Cube-frame state change of reading class k as a slice: k then its partner.
+SLICE_VECS = np.stack([compose(CLASS_VECS[k], CLASS_VECS[SLICE_PARTNER[k]])
+                      for k in range(12)])
+
+
+def slice_mask(probs: np.ndarray, gate: float = SLICE_GATE) -> np.ndarray:
+    """
+    (12,) bool: may this onset be read as a slice starting from class k?
+
+    True only where the posterior puts real mass on BOTH halves of the pair,
+    which is what a slice looks like to a classifier trained on overlapping
+    windows for the two halves (see SLICE_GATE). A confident single turn puts
+    ~0 on the opposite face and gates out entirely.
+    """
+    p = np.asarray(probs, dtype=np.float64)
+    return (p > gate) & (p[SLICE_PARTNER] > gate)
 
 
 def seq_to_state(names: list[str]) -> np.ndarray:
@@ -569,7 +654,81 @@ def onset_costs(probs: np.ndarray,
 # ---------------------------------------------------------------------------
 
 # Trace op codes (for backtracking the winning hypothesis)
-OP_CARRY, OP_ACCEPT, OP_DELETE, OP_INSERT, OP_ROTATE = range(5)
+(OP_CARRY, OP_ACCEPT, OP_DELETE, OP_INSERT, OP_ROTATE, OP_SLICE,
+ OP_ALGO, OP_ALGO_HOLD) = range(8)
+
+
+# ---------------------------------------------------------------------------
+# The abstract state: solve progress, as a function of the cube state
+# ---------------------------------------------------------------------------
+#
+# ALGORITHM_PRIOR.md §7. The beam already carries a concrete cube state per
+# hypothesis, so "how far through a layer-by-layer solve is this" is
+# computable for free at every step, with no perception involved. That
+# abstraction is what gates OP_ALGO: an algorithm may only be proposed
+# where some face's first two layers are complete both before and after,
+# and the transition must make strict progress. Random states essentially
+# never satisfy that, which is why this gate is far tighter than
+# SLICE_GATE's posterior heuristic could ever be.
+
+# Which cubies belong to each face's layer, in the Kociemba naming the
+# state vector uses.
+_CORNER_FACES = ["URF", "UFL", "ULB", "UBR", "DFR", "DLF", "DBL", "DRB"]
+_EDGE_FACES = ["UR", "UF", "UL", "UB", "DR", "DF", "DL", "DB",
+               "FR", "FL", "BL", "BR"]
+# (6, 8) / (6, 12) masks: True where the cubie is NOT in that face's layer,
+# i.e. the pieces that must be solved for "F2L complete under this top face".
+_F2L_CORNERS = np.array([[f not in _CORNER_FACES[i] for i in range(8)]
+                         for f in TP_NAME], dtype=bool)
+_F2L_EDGES = np.array([[f not in _EDGE_FACES[i] for i in range(12)]
+                       for f in TP_NAME], dtype=bool)
+_HOME_C = np.arange(8, dtype=np.int8)
+_HOME_E = np.arange(12, dtype=np.int8)
+
+
+def piece_solved(states: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(m, 8) and (m, 12) booleans: is each cubie home and oriented?"""
+    st = np.atleast_2d(states)
+    return ((st[:, _CP] == _HOME_C) & (st[:, _CO] == 0),
+            (st[:, _EP] == _HOME_E) & (st[:, _EO] == 0))
+
+
+def f2l_complete(states: np.ndarray) -> np.ndarray:
+    """
+    (m, 6) booleans: for each candidate top face, is everything below it
+    solved? Column order is TP_NAME (URFDLB).
+    """
+    cs, es = piece_solved(states)
+    # (m, 1, 8) & (1, 6, 8) -> all over the pieces that must be solved
+    ok_c = np.all(cs[:, None, :] | ~_F2L_CORNERS[None], axis=2)
+    ok_e = np.all(es[:, None, :] | ~_F2L_EDGES[None], axis=2)
+    return ok_c & ok_e
+
+
+def n_solved(states: np.ndarray) -> np.ndarray:
+    """(m,) count of cubies that are home and oriented."""
+    cs, es = piece_solved(states)
+    return cs.sum(axis=1) + es.sum(axis=1)
+
+
+# A NOTE ON WHAT THE GATE DELIBERATELY DOES NOT REQUIRE.
+#
+# The obvious extra condition is that an algorithm must make PROGRESS — more
+# solved cubies after than before. It was written that way first and it is
+# wrong. Measured over the 95 ground-truth last-layer chunks:
+#
+#     strict increase in solved cubies                56%
+#     strict increase in solved + correctly oriented  66%
+#     merely non-decreasing in that same measure      79%
+#
+# No monotone rung exists, because an orientation algorithm reorients the
+# pieces it is not aiming at: `F R U R' U' F'` fixes edge orientation and
+# scrambles corner orientation on the way through. Requiring progress
+# therefore rejects a fifth to a half of genuinely performed algorithms —
+# it rejects exactly the OLL stage. The cut-point predicate alone (F2L
+# complete before AND after) is the gate, and it is already tight: a
+# hypothesis that has mis-decoded anything below the last layer cannot
+# satisfy it at all.
 
 
 class _Beam:
@@ -578,23 +737,73 @@ class _Beam:
     def __init__(self, start: np.ndarray, top_classes: list[int],
                  max_end_ins: int = MAX_END_INS,
                  rel_weight: float = REL_WEIGHT,
-                 use_bounds: bool = True):
+                 use_bounds: bool = True, slices: bool = False,
+                 slice_ref: list[bool] | None = None,
+                 algo_ref: list[tuple] | None = None,
+                 algo_turns: int = 1):
         self.max_end_ins = max_end_ins
         self.rel_weight = rel_weight
         self.use_bounds = use_bounds
+        # With OP_SLICE enabled an onset may contribute TWO quarter turns
+        # instead of one, which invalidates both of _rank's admissible
+        # bounds as written. See _rank.
+        self.slices = slices
+        # Which onsets the REFERENCE story reads as slices. The consistency
+        # ladder measures every hypothesis against "apply the remaining
+        # detections as-is"; if that reference applies a gated slice onset
+        # as a single turn, then the true slice-using story's residual can
+        # never be SOLVED and never lands in rep1, so the truth sits at
+        # RESID_CAP for the whole decode while wrong-but-one-plain-edit
+        # stories rank above it. Measured directly: the truth was evicted
+        # at onset 25 of 88 on solve_20260724_103307_solve while doing a
+        # conf-1.000 accept, purely on rank.
+        self.slice_ref = slice_ref
+        # Which onset spans the REFERENCE story reads as a whole algorithm,
+        # as [(start, k, group element of the word)]. Exactly the same
+        # problem slice_ref solves, one order of magnitude larger: a story
+        # that consumed 15 onsets with one OP_ALGO differs from a reference
+        # that applied 15 separate argmax turns, so its residual is never
+        # SOLVED, never lands in rep1, and it sits at RESID_CAP for the
+        # whole decode while cheap one-edit-away garbage ranks above it.
+        self.algo_ref = algo_ref or []
+        self._algo_at = {a: (k, v) for a, k, v in self.algo_ref}
+        self._algo_inside = {i for a, k, _ in self.algo_ref
+                             for i in range(a + 1, a + k)}
+        # Max quarter turns one onset may supply, for _rank's capacity bound.
+        self.algo_turns = algo_turns
         self.top_classes = top_classes      # detected argmax per onset
         self._suffix: dict[int, list[np.ndarray]] = {}
         self._rep1: dict[int, np.ndarray] = {}
         self.states = start[None, :].copy()
         self.sigmas = np.zeros(1, dtype=np.int32)
         self.costs = np.zeros(1, dtype=np.float32)
+        # Onsets already consumed by an in-flight OP_ALGO. A hypothesis with
+        # debt > 0 has ALREADY paid for the next `debt` onsets and must not
+        # read them again; it is excluded from every other transition until
+        # the debt clears. This is what lets one beam step consume many
+        # onsets without breaking the one-stage-per-onset parent-pointer
+        # structure the trace depends on.
+        self.debt = np.zeros(1, dtype=np.int16)
+        # arg of an OP_ALGO row indexes these; filled in by _run_beam.
+        self.algo_words: list[list[int] | None] = []
+        self.algo_spans: list[tuple[int, int]] = []
+        # Diagnostics, not search state. "OP_ALGO did not appear in the
+        # winning story" has two very different causes — the abstract gate
+        # never admitted anyone, or it did and the story lost anyway — and
+        # they point at opposite next moves (fix the prefix vs loosen the
+        # gate). Counting admissions separates them.
+        self.algo_offered = 0
+        self.algo_onsets: set[int] = set()
         self.stages: list[dict] = [{
             "parent": np.array([-1], dtype=np.int32),
             "op": np.array([OP_CARRY], dtype=np.int8),
-            "arg": np.array([0], dtype=np.int8),
+            "arg": np.array([0], dtype=np.int16),
         }]
         rng = np.random.default_rng(0xC0BE)
-        self._hash_mat = rng.integers(1, 2 ** 62, size=(41, 2), dtype=np.int64)
+        # 40 state entries + orientation + OP_ALGO debt. _hash40 uses the
+        # first 40 rows only, so the state-only hash is unaffected by the
+        # extra columns and the ladder's precomputed sets stay valid.
+        self._hash_mat = rng.integers(1, 2 ** 62, size=(42, 2), dtype=np.int64)
 
     def suffix(self, sid: int, j: int) -> np.ndarray:
         """
@@ -605,10 +814,31 @@ class _Beam:
             n = len(self.top_classes)
             suf = [SOLVED.copy() for _ in range(n + 1)]
             for i in range(n - 1, -1, -1):
-                suf[i] = compose(move_for(sid, self.top_classes[i]),
-                                 suf[i + 1])
+                suf[i] = compose(self._ref_move(sid, i), suf[i + 1])
             self._suffix[sid] = suf
         return self._suffix[sid][j]
+
+    def _ref_move(self, sid: int, i: int) -> np.ndarray:
+        """
+        The reference story's contribution at onset i — the whole word where
+        a gated algorithm span starts, nothing at all inside one, a slice
+        where the slice gate fired, otherwise the plain argmax turn.
+        """
+        if i in self._algo_at:
+            _, vec = self._algo_at[i]
+            if sid == 0:
+                return vec
+            # Algorithm spans are camera-frame words; only sigma 0 is
+            # exercised (OP_ALGO requires rotations=False), so any other
+            # orientation falls back to the plain reading rather than
+            # silently mis-rotating the reference.
+        elif i in self._algo_inside and sid == 0:
+            return SOLVED.copy()
+        k = self.top_classes[i]
+        mv = move_for(sid, k)
+        if self.slice_ref and self.slice_ref[i]:
+            mv = compose(mv, move_for(sid, int(SLICE_PARTNER[k])))
+        return mv
 
     def _hash40(self, states: np.ndarray) -> np.ndarray:
         h = states.astype(np.int64) @ self._hash_mat[:40]
@@ -634,7 +864,7 @@ class _Beam:
                     ins = compose(compose(s_inv, move_for(sid, INV12[m])), s)
                     els.append(ins)
             for q in range(n):
-                d = move_for(sid, self.top_classes[q])
+                d = self._ref_move(sid, q)
                 s_inv, s = inv_cache[q + 1], suf[q + 1]
                 els.append(compose(compose(s_inv, d), s))          # delete
                 for m in range(12):
@@ -642,6 +872,32 @@ class _Beam:
                         continue
                     mid = compose(move_for(sid, INV12[m]), d)
                     els.append(compose(compose(s_inv, mid), s))    # sub
+                # Toggling onset q between "one turn" and "a slice" is also
+                # a single edit, so a story that differs from the reference
+                # only there deserves level 1 rather than RESID_CAP.
+                if self.slices:
+                    k = self.top_classes[q]
+                    alt = move_for(sid, k)
+                    if not (self.slice_ref and self.slice_ref[q]):
+                        alt = compose(alt, move_for(sid,
+                                                    int(SLICE_PARTNER[k])))
+                    mid = compose(inverse(alt), d)
+                    els.append(compose(compose(s_inv, mid), s))
+            # Reading a gated span the OTHER way — as its onsets rather than
+            # as the algorithm — is also a single edit. Without this a
+            # correct per-onset story inside a gated span is scored as
+            # hopeless rather than one edit away, which is the same eviction
+            # the slice toggle above exists to prevent, in the opposite
+            # direction.
+            for a, k_span, vec in self.algo_ref:
+                if a + k_span > n:
+                    continue
+                alt = SOLVED.copy()
+                for i in range(a, a + k_span):
+                    alt = compose(alt, move_for(sid, self.top_classes[i]))
+                s_inv, s = inv_cache[a + k_span], suf[a + k_span]
+                mid = compose(inverse(alt), vec if sid == 0 else alt)
+                els.append(compose(compose(s_inv, mid), s))
             self._rep1[sid] = np.unique(self._hash40(np.stack(els)))
         return self._rep1[sid]
 
@@ -725,20 +981,41 @@ class _Beam:
         # Admissible part: capacity and parity bounds. The capacity term
         # can only fire when the pattern bound (<= ~12) can exceed the
         # applicable-move budget, i.e. near the tail — skip it elsewhere.
-        if remaining + self.max_end_ins < 14:
+        #
+        # Both bounds below assume each remaining onset supplies exactly ONE
+        # quarter turn. OP_SLICE breaks that assumption — an onset read as a
+        # slice supplies two — so with slices enabled the capacity budget
+        # doubles and the parity argument dissolves entirely (a slice is two
+        # quarter turns, i.e. parity-neutral, so the remaining onsets can
+        # produce either parity). Keeping either bound unmodified would
+        # penalise exactly the slice stories this exists to find.
+        #
+        # OP_ALGO breaks it far harder in the same direction: one onset can
+        # begin a 21-turn word. `algo_turns` is the largest turns-per-onset
+        # ratio any live candidate has, so the budget stays an over-estimate
+        # — over-estimating capacity can only UNDER-penalise, which is
+        # admissible; under-estimating it would evict the truth. Parity
+        # dissolves for the same reason it does with slices: a word of any
+        # length may be odd or even.
+        per_onset = max(2 if self.slices else 1,
+                        self.algo_turns if self.algo_ref else 1)
+        budget = remaining * per_onset + self.max_end_ins
+        if budget < 14:
             need = h_light(states, tables)
-            over = need - (remaining + self.max_end_ins)
-            pen += np.maximum(over, 0).astype(np.float32) * c_ins
-        par_bad = corner_parity(states) != (remaining % 2)
-        # Parity can only be repaired by a net-odd insert/delete (or an
-        # odd number of end-insertions) — either way >= one edit.
-        pen += par_bad.astype(np.float32) * min(c_ins, c_del)
+            pen += np.maximum(need - budget, 0).astype(np.float32) * c_ins
+        if not self.slices and not self.algo_ref:
+            par_bad = corner_parity(states) != (remaining % 2)
+            # Parity can only be repaired by a net-odd insert/delete (or an
+            # odd number of end-insertions) — either way >= one edit.
+            pen += par_bad.astype(np.float32) * min(c_ins, c_del)
         return costs + pen
 
     def merge(self, cand_states, cand_sigmas, cand_costs,
               cand_parent, cand_op, cand_arg,
-              remaining, k, c_ins, c_del, tables):
+              remaining, k, c_ins, c_del, tables, cand_debt=None):
         """Dedupe candidates by (state, orientation), keep top-k by rank."""
+        if cand_debt is None:
+            cand_debt = np.zeros(len(cand_costs), dtype=np.int16)
         # Cheapest-first so np.unique's first occurrence is the min cost.
         order = np.argsort(cand_costs, kind="stable")
         st = cand_states[order]
@@ -747,17 +1024,25 @@ class _Beam:
         pa = cand_parent[order]
         op = cand_op[order]
         ar = cand_arg[order]
+        db = cand_debt[order]
 
         # Single-int64 hash of (state, orientation): a 1-D unique is far
         # cheaper than a row-wise one, and a 64-bit collision (~1e-10 per
         # merge) at worst drops one duplicate hypothesis.
+        #
+        # Debt is part of the key, not a passenger. Two hypotheses at the
+        # same cube state owing different numbers of onsets are genuinely
+        # different futures — one still has onsets to read, the other has
+        # already paid for them — and collapsing them onto the cheaper one
+        # silently deletes the more expensive future.
         h2 = np.concatenate(
             [st.astype(np.int64),
-             sg.astype(np.int64)[:, None]], axis=1) @ self._hash_mat
+             sg.astype(np.int64)[:, None],
+             db.astype(np.int64)[:, None]], axis=1) @ self._hash_mat
         key = h2[:, 0] ^ (h2[:, 1] << 1)
         _, first = np.unique(key, return_index=True)
 
-        st, sg, co = st[first], sg[first], co[first]
+        st, sg, co, db = st[first], sg[first], co[first], db[first]
         pa, op, ar = pa[first], op[first], ar[first]
 
         # No cost-based pre-truncation before ranking: the consistency
@@ -775,6 +1060,7 @@ class _Beam:
         self.states = st[keep]
         self.sigmas = sg[keep]
         self.costs = co[keep]
+        self.debt = db[keep]
         self.stages.append({"parent": pa[keep], "op": op[keep],
                             "arg": ar[keep]})
 
@@ -832,7 +1118,10 @@ def _run_beam(start: np.ndarray, cost_rows: list[np.ndarray],
              rel_weight: float = REL_WEIGHT,
              rotations: bool = False, insertions: bool = True,
              max_chain: int = MAX_CHAIN, tables: dict | None = None,
-             use_bounds: bool = True) -> "_Beam":
+             use_bounds: bool = True,
+             slices: bool = False, c_slice: float = C_SLICE,
+             slice_rows: list[np.ndarray] | None = None,
+             algo_cands: list[dict] | None = None) -> "_Beam":
     """
     Run the beam-search accumulation loop over `cost_rows`, starting from
     `start`, and return the live `_Beam` — no target, no tail completion.
@@ -855,106 +1144,268 @@ def _run_beam(start: np.ndarray, cost_rows: list[np.ndarray],
     # heuristic's reference story (suffix products + the REP1 ladder) —
     # never as a cost or a constraint, so it cannot bias the result.
     top_classes = [int(np.argmin(row)) for row in cost_rows]
-    bm = _Beam(start, top_classes, max_end_ins, rel_weight, use_bounds)
+    # The reference story reads a gated onset as a slice — that is what the
+    # gate is asserting, and the ladder must measure against it. See
+    # _Beam.slice_ref.
+    slice_ref = None
+    if slices and slice_rows is not None:
+        slice_ref = [bool(slice_rows[i][top_classes[i]]) for i in range(n)]
+
+    # -- OP_ALGO setup (ALGORITHM_PRIOR.md §7) ---------------------------
+    algo_cands = algo_cands or []
+    if algo_cands and rotations:
+        raise ValueError("OP_ALGO and --rotations are not compatible: "
+                         "library words are camera-frame, so a mid-solve "
+                         "reorientation would silently mis-apply them")
+    by_start: dict[int, list[dict]] = {}
+    algo_vecs: list[np.ndarray] = []
+    algo_turns = 1
+    for c in algo_cands:
+        if c["start"] + c["k"] > n:
+            continue
+        vec = SOLVED.copy()
+        for lab in c["labels"]:
+            vec = compose(vec, CLASS_VECS[lab])
+        c = dict(c, vec=vec, idx=len(algo_vecs))
+        algo_vecs.append(vec)
+        by_start.setdefault(c["start"], []).append(c)
+        algo_turns = max(algo_turns, -(-len(c["labels"]) // c["k"]))
+    # The reference story needs ONE reading per onset, so the gated spans
+    # must be a non-overlapping cover: cheapest first, greedily.
+    algo_ref, taken = [], np.zeros(n, dtype=bool)
+    for c in sorted((c for cs in by_start.values() for c in cs),
+                    key=lambda c: c["cost"]):
+        a, k_span = c["start"], c["k"]
+        if taken[a:a + k_span].any():
+            continue
+        taken[a:a + k_span] = True
+        algo_ref.append((a, k_span, c["vec"]))
+
+    bm = _Beam(start, top_classes, max_end_ins, rel_weight, use_bounds,
+               slices, slice_ref, algo_ref, algo_turns)
 
     for j in range(n):
         remaining = n - j
+        # Rows mid-algorithm have already paid for onset j and must sit out
+        # every transition below; they only tick their debt down.
+        free = bm.debt <= 0
+        held = ~free
 
         # -- expansion rounds: insertions / rotations, staying at onset j
         rounds = max_chain if (insertions or rotations) else 0
         for _ in range(rounds):
             m = len(bm.states)
-            parts_s, parts_g, parts_c, parts_p, parts_o, parts_a = \
-                [bm.states], [bm.sigmas], [bm.costs], \
-                [np.arange(m, dtype=np.int32)], \
-                [np.full(m, OP_CARRY, np.int8)], [np.zeros(m, np.int8)]
-            if insertions:
+            idx = np.arange(m, dtype=np.int32)
+            fr = idx[bm.debt <= 0]          # every row when OP_ALGO is off
+            f_st, f_sg, f_co = bm.states[fr], bm.sigmas[fr], bm.costs[fr]
+            nf = len(fr)
+            parts_s, parts_g, parts_c, parts_p, parts_o, parts_a, parts_d = \
+                [bm.states], [bm.sigmas], [bm.costs], [idx], \
+                [np.full(m, OP_CARRY, np.int8)], [np.zeros(m, np.int16)], \
+                [bm.debt]
+            if insertions and nf:
                 for k in range(12):
                     if rotations:
-                        new = np.empty_like(bm.states)
-                        for sid in np.unique(bm.sigmas):
-                            rows = bm.sigmas == sid
-                            new[rows] = apply_batch(bm.states[rows],
+                        new = np.empty_like(f_st)
+                        for sid in np.unique(f_sg):
+                            rows = f_sg == sid
+                            new[rows] = apply_batch(f_st[rows],
                                                     move_for(int(sid), k))
                     else:
-                        new = apply_batch(bm.states, CLASS_VECS[k])
+                        new = apply_batch(f_st, CLASS_VECS[k])
                     parts_s.append(new)
-                    parts_g.append(bm.sigmas)
-                    parts_c.append(bm.costs + c_ins)
-                    parts_p.append(np.arange(m, dtype=np.int32))
-                    parts_o.append(np.full(m, OP_INSERT, np.int8))
-                    parts_a.append(np.full(m, k, np.int8))
-            if rotations:
+                    parts_g.append(f_sg)
+                    parts_c.append(f_co + c_ins)
+                    parts_p.append(fr)
+                    parts_o.append(np.full(nf, OP_INSERT, np.int8))
+                    parts_a.append(np.full(nf, k, np.int16))
+                    parts_d.append(np.zeros(nf, np.int16))
+            if rotations and nf:
                 for r, rname in enumerate(ROT_NAMES):
                     new_sig = np.array([rotate_sigma(int(s), rname)
-                                        for s in bm.sigmas], dtype=np.int32)
-                    parts_s.append(bm.states)
+                                        for s in f_sg], dtype=np.int32)
+                    parts_s.append(f_st)
                     parts_g.append(new_sig)
-                    parts_c.append(bm.costs + c_rot)
-                    parts_p.append(np.arange(m, dtype=np.int32))
-                    parts_o.append(np.full(m, OP_ROTATE, np.int8))
-                    parts_a.append(np.full(m, r, np.int8))
+                    parts_c.append(f_co + c_rot)
+                    parts_p.append(fr)
+                    parts_o.append(np.full(nf, OP_ROTATE, np.int8))
+                    parts_a.append(np.full(nf, r, np.int16))
+                    parts_d.append(np.zeros(nf, np.int16))
             bm.merge(np.concatenate(parts_s), np.concatenate(parts_g),
                      np.concatenate(parts_c), np.concatenate(parts_p),
                      np.concatenate(parts_o), np.concatenate(parts_a),
-                     remaining, beam, c_ins, c_del, tables)
+                     remaining, beam, c_ins, c_del, tables,
+                     np.concatenate(parts_d))
 
         # -- consume onset j: accept one of 12 classes, or delete it
         m = len(bm.states)
+        idx = np.arange(m, dtype=np.int32)
+        fr = idx[bm.debt <= 0]              # every row when OP_ALGO is off
+        f_st, f_sg, f_co = bm.states[fr], bm.sigmas[fr], bm.costs[fr]
+        nf = len(fr)
         costs_j = cost_rows[j]
-        parts_s, parts_g, parts_c, parts_p, parts_o, parts_a = \
-            [], [], [], [], [], []
+        parts_s, parts_g, parts_c, parts_p, parts_o, parts_a, parts_d = \
+            [], [], [], [], [], [], []
+
+        # Rows mid-algorithm: tick the debt down, change nothing else. They
+        # already paid for this onset when the OP_ALGO transition was taken.
+        hr = idx[bm.debt > 0]
+        if len(hr):
+            parts_s.append(bm.states[hr])
+            parts_g.append(bm.sigmas[hr])
+            parts_c.append(bm.costs[hr])
+            parts_p.append(hr)
+            parts_o.append(np.full(len(hr), OP_ALGO_HOLD, np.int8))
+            parts_a.append(np.zeros(len(hr), np.int16))
+            parts_d.append(bm.debt[hr] - 1)
+
         for k in range(12):
             if rotations:
-                new = np.empty_like(bm.states)
-                for sid in np.unique(bm.sigmas):
-                    rows = bm.sigmas == sid
-                    new[rows] = apply_batch(bm.states[rows],
-                                            move_for(int(sid), k))
+                new = np.empty_like(f_st)
+                for sid in np.unique(f_sg):
+                    rows = f_sg == sid
+                    new[rows] = apply_batch(f_st[rows], move_for(int(sid), k))
             else:
-                new = apply_batch(bm.states, CLASS_VECS[k])
+                new = apply_batch(f_st, CLASS_VECS[k])
             parts_s.append(new)
-            parts_g.append(bm.sigmas)
-            parts_c.append(bm.costs + costs_j[k])
-            parts_p.append(np.arange(m, dtype=np.int32))
-            parts_o.append(np.full(m, OP_ACCEPT, np.int8))
-            parts_a.append(np.full(m, k, np.int8))
-        parts_s.append(bm.states)
-        parts_g.append(bm.sigmas)
-        parts_c.append(bm.costs + float(del_costs[j]))
-        parts_p.append(np.arange(m, dtype=np.int32))
-        parts_o.append(np.full(m, OP_DELETE, np.int8))
-        parts_a.append(np.zeros(m, np.int8))
+            parts_g.append(f_sg)
+            parts_c.append(f_co + costs_j[k])
+            parts_p.append(fr)
+            parts_o.append(np.full(nf, OP_ACCEPT, np.int8))
+            parts_a.append(np.full(nf, k, np.int16))
+            parts_d.append(np.zeros(nf, np.int16))
+
+            # -- read this one onset as a middle slice: class k AND its
+            # partner, from a single detected motion (see SLICE_PARTNER).
+            # Priced off the SAME acceptance cost as the plain read, so a
+            # slice is only ever preferred where the classifier already
+            # liked k and the story needs the extra turn.
+            if slices and (slice_rows is None or slice_rows[j][k]):
+                if rotations:
+                    sl = np.empty_like(f_st)
+                    for sid in np.unique(f_sg):
+                        rows = f_sg == sid
+                        sl[rows] = apply_batch(
+                            apply_batch(f_st[rows], move_for(int(sid), k)),
+                            move_for(int(sid), int(SLICE_PARTNER[k])))
+                else:
+                    sl = apply_batch(f_st, SLICE_VECS[k])
+                parts_s.append(sl)
+                parts_g.append(f_sg)
+                parts_c.append(f_co + costs_j[k] + c_slice)
+                parts_p.append(fr)
+                parts_o.append(np.full(nf, OP_SLICE, np.int8))
+                parts_a.append(np.full(nf, k, np.int16))
+                parts_d.append(np.zeros(nf, np.int16))
+        parts_s.append(f_st)
+        parts_g.append(f_sg)
+        parts_c.append(f_co + float(del_costs[j]))
+        parts_p.append(fr)
+        parts_o.append(np.full(nf, OP_DELETE, np.int8))
+        parts_a.append(np.zeros(nf, np.int16))
+        parts_d.append(np.zeros(nf, np.int16))
+
+        # -- OP_ALGO: consume onsets j..j+k-1 as one known algorithm.
+        #
+        # Gated by the ABSTRACT state, not by a posterior heuristic: the
+        # SAME face's first two layers must be complete both before and
+        # after, i.e. the hypothesis is at a genuine cut point and the word
+        # preserves everything below the last layer. A hypothesis that has
+        # mis-decoded anything earlier cannot satisfy that, which is what
+        # keeps these multi-move jumps from flooding the beam the way
+        # ungated slices did. See the note above n_solved for why there is
+        # deliberately no progress requirement on top.
+        if nf:
+            for cand in by_start.get(j, []):
+                if j + cand["k"] > n:
+                    continue
+                before = f2l_complete(f_st)
+                if not before.any():
+                    continue
+                new = apply_batch(f_st, cand["vec"])
+                after = f2l_complete(new)
+                ok = ((before & after).any(axis=1)
+                      & (new != f_st).any(axis=1))
+                rows = np.where(ok)[0]
+                if not len(rows):
+                    continue
+                bm.algo_offered += len(rows)
+                bm.algo_onsets.add(j)
+                parts_s.append(new[rows])
+                parts_g.append(f_sg[rows])
+                parts_c.append(f_co[rows] + cand["cost"])
+                parts_p.append(fr[rows])
+                parts_o.append(np.full(len(rows), OP_ALGO, np.int8))
+                parts_a.append(np.full(len(rows), cand["idx"], np.int16))
+                parts_d.append(np.full(len(rows), cand["k"] - 1, np.int16))
 
         bm.merge(np.concatenate(parts_s), np.concatenate(parts_g),
                  np.concatenate(parts_c), np.concatenate(parts_p),
                  np.concatenate(parts_o), np.concatenate(parts_a),
-                 remaining - 1, beam, c_ins, c_del, tables)
+                 remaining - 1, beam, c_ins, c_del, tables,
+                 np.concatenate(parts_d))
 
+    bm.algo_words = [None] * len(algo_vecs)
+    bm.algo_spans = [(0, 0)] * len(algo_vecs)
+    for cs in by_start.values():
+        for c in cs:
+            bm.algo_words[c["idx"]] = c["labels"]
+            bm.algo_spans[c["idx"]] = (c["start"], c["k"])
     return bm
 
 
-def _ops_to_moves(bm: "_Beam", row: int) -> tuple[list, list[str]]:
+def _ops_to_moves(bm: "_Beam", row: int) -> tuple[list, list[str], list[dict]]:
     """
-    backtrace(row) -> (ops, moves) named the way decode()'s result dict
-    reports them. Shared by decode() and decode_bidirectional so the two
-    never format a reconstruction differently.
+    backtrace(row) -> (ops, moves, algo_spans) named the way decode()'s
+    result dict reports them. Shared by decode() and decode_bidirectional so
+    the two never format a reconstruction differently.
+
+    `algo_spans` records which OP_ALGO transitions the winning story
+    actually took — the question "did the prior fire, and where" is not
+    answerable from the move list alone, since OP_ALGO emits plain WCA
+    moves indistinguishable from accepted ones.
     """
     ops: list[tuple[str, str | None]] = []
     moves: list[str] = []
+    fired: list[dict] = []
     sid = 0
+
+    def cube_name(k: int) -> str:
+        return (TP_NAME[_SIGMAS[sid][CLASS_FACE[k]]]
+                + ("'" if CLASS_POWER[k] == 3 else ""))
+
     for op, arg in bm.backtrace(row):
         if op == OP_ACCEPT or op == OP_INSERT:
-            cube_face = _SIGMAS[sid][CLASS_FACE[arg]]
-            name = TP_NAME[cube_face] + ("'" if CLASS_POWER[arg] == 3 else "")
+            name = cube_name(arg)
             ops.append(("accept" if op == OP_ACCEPT else "insert", name))
             moves.append(name)
+        elif op == OP_SLICE:
+            # One onset, two layer turns. Both are emitted into `moves` so
+            # the reconstruction stays a plain WCA word — every consumer
+            # downstream (the replay assert in decode(), score_vs_gt,
+            # verify_solve) keeps working without knowing slices exist.
+            first, second = cube_name(arg), cube_name(int(SLICE_PARTNER[arg]))
+            ops.append(("slice", f"{first}{second}"))
+            moves.extend((first, second))
+        elif op == OP_ALGO:
+            # One transition, many onsets, a whole known word. Emitted move
+            # by move so the reconstruction stays a plain WCA word and every
+            # consumer downstream keeps working without knowing OP_ALGO
+            # exists — same contract as OP_SLICE.
+            word = [cube_name(k) for k in bm.algo_words[arg]]
+            start, k_span = bm.algo_spans[arg]
+            ops.append(("algorithm", " ".join(word)))
+            fired.append({"onset": start, "n_onsets": k_span,
+                          "move_index": len(moves), "word": word})
+            moves.extend(word)
+        elif op == OP_ALGO_HOLD:
+            pass                    # onset already paid for by its OP_ALGO
         elif op == OP_DELETE:
             ops.append(("delete", None))
         elif op == OP_ROTATE:
             sid = rotate_sigma(sid, ROT_NAMES[arg])
             ops.append(("rotate", ROT_NAMES[arg]))
-    return ops, moves
+    return ops, moves, fired
 
 
 def decode(start: np.ndarray, cost_rows: list[np.ndarray], *,
@@ -963,7 +1414,10 @@ def decode(start: np.ndarray, cost_rows: list[np.ndarray], *,
            rel_weight: float = REL_WEIGHT,
            del_costs: np.ndarray | None = None,
            rotations: bool = False, insertions: bool = True,
-           max_chain: int = MAX_CHAIN, tables: dict | None = None) -> dict:
+           max_chain: int = MAX_CHAIN, tables: dict | None = None,
+           slices: bool = False, c_slice: float = C_SLICE,
+           slice_rows: list[np.ndarray] | None = None,
+           algo_cands: list[dict] | None = None) -> dict:
     """
     Beam-decode the detected sequence against start -> solved.
 
@@ -971,6 +1425,20 @@ def decode(start: np.ndarray, cost_rows: list[np.ndarray], *,
     class (see onset_costs). del_costs: optional per-onset deletion cost
     (from onset strength — see the module docstring); defaults to a flat
     c_del.
+
+    `slices` enables OP_SLICE: one onset may be read as a middle-slice turn
+    and emit two layer moves for c_slice on top of its acceptance cost.
+    Defaults OFF, which reproduces the exact prior behaviour. `slice_rows`
+    (from costs_from_moves) restricts WHICH onsets may be read that way —
+    without it the transition is offered everywhere and the beam floods; see
+    SLICE_GATE.
+
+    `algo_cands` enables OP_ALGO: a span of onsets read as one known
+    last-layer algorithm, applying the whole word for one cost (see
+    ALGORITHM_PRIOR.md §7 and algorithm_gate.build_candidates, which
+    produces these). Defaults None = off, reproducing prior behaviour
+    exactly. Unlike the slice gate this is gated on the ABSTRACT CUBE STATE
+    of each hypothesis, so it can only fire at a genuine cut point.
 
     Returns a dict with "solved", "cost", "ops" (chronological
     [(op_name, class/rotation name or None), ...]), "moves" (the
@@ -985,7 +1453,9 @@ def decode(start: np.ndarray, cost_rows: list[np.ndarray], *,
     bm = _run_beam(start, cost_rows, del_costs, beam=beam, c_del=c_del,
                    c_ins=c_ins, c_rot=c_rot, max_end_ins=max_end_ins,
                    rel_weight=rel_weight, rotations=rotations,
-                   insertions=insertions, max_chain=max_chain, tables=tables)
+                   insertions=insertions, max_chain=max_chain, tables=tables,
+                   slices=slices, c_slice=c_slice, slice_rows=slice_rows,
+                   algo_cands=algo_cands)
 
     # -- tail: finish each candidate end state exactly.
     # Exactly-solved detection is a vectorised scan of the WHOLE beam —
@@ -1030,16 +1500,30 @@ def decode(start: np.ndarray, cost_rows: list[np.ndarray], *,
         "n_onsets": n,
         "beam": beam,
         "decode_seconds": time.time() - t0,
+        # Reported whether or not a story was found — on a failed decode
+        # this is the only evidence about whether OP_ALGO was reachable.
+        "algo_offered": bm.algo_offered,
+        "algo_gate_onsets": sorted(bm.algo_onsets),
     }
     if best is None:
         # Diagnostics for the failure: how far is the closest end state?
         hmin = min(h_full(bm.states[r], tables) for r in order[:64])
+        # The MAP story among hypotheses that consumed every onset, even
+        # though it does not reach solved. This is NOT a verifiable claim
+        # and must never be reported as one — but "how close to the truth
+        # did we get" is a graded question, and a decode that fails the
+        # binary check can still be nearly right. Scoring it is the only
+        # way to see movement on sessions that are all currently failures.
+        cheapest = int(order[0])
+        _, be_moves, _ = _ops_to_moves(bm, cheapest)
         result.update({"cost": None, "ops": None, "moves": None,
-                       "min_h_final": int(hmin)})
+                       "min_h_final": int(hmin),
+                       "best_effort_moves": be_moves,
+                       "best_effort_cost": float(bm.costs[cheapest])})
         return result
 
     total, row, end_word = best
-    ops, moves = _ops_to_moves(bm, row)   # cube-frame layer turns applied
+    ops, moves, algo_fired = _ops_to_moves(bm, row)  # cube-frame turns
     for k in end_word:
         # _completion searches in the cube frame directly, so its word
         # needs no orientation mapping — mapping it through sigma again
@@ -1059,7 +1543,11 @@ def decode(start: np.ndarray, cost_rows: list[np.ndarray], *,
     for op_name, _ in ops:
         counts[op_name] = counts.get(op_name, 0) + 1
     result.update({"cost": total, "ops": ops, "moves": moves,
-                   "op_counts": counts})
+                   "op_counts": counts, "algo_fired": algo_fired,
+                   # Same field on the success path so callers scoring
+                   # "how close to truth" never have to branch.
+                   "best_effort_moves": moves,
+                   "best_effort_cost": total})
     return result
 
 
@@ -1077,7 +1565,17 @@ def decode_between(start_state: np.ndarray, end_state: np.ndarray,
     a property of a genuine cube state and survives the shift unchanged —
     only the target moves. The returned "moves" are W, in the cube frame,
     exactly as decode() reports them.
+
+    OP_ALGO is the one thing that does NOT survive the shift: its gate asks
+    whether a hypothesis' first two layers are solved, and under a shifted
+    frame that predicate is about `end^-1 * actual`, not the actual cube.
+    Refused loudly rather than silently mis-gated. (The decoy sweep is
+    unaffected — a decoy claim still targets SOLVED, it just starts
+    somewhere else, and the predicate stays meaningful.)
     """
+    if kw.get("algo_cands") and not (end_state == SOLVED).all():
+        raise ValueError("algo_cands requires end_state == SOLVED: the "
+                         "abstract-state gate is not frame-shift invariant")
     return decode(compose(inverse(end_state), start_state), cost_rows, **kw)
 
 
@@ -1212,13 +1710,13 @@ def decode_bidirectional(start_state: np.ndarray, end_state: np.ndarray,
         return result
 
     total, i, j = best
-    fwd_ops, fwd_moves = _ops_to_moves(bm_f, i)
+    fwd_ops, fwd_moves, _ = _ops_to_moves(bm_f, i)
     # Backward ops are in backward-chronological order (position 0 = the
     # LAST original onset); reverse for forward-time order, and map each
     # accepted/inserted class through INV12 back to the ORIGINAL move name
     # (see the docstring derivation — the backward beam's own class c
     # represents original move INV12[c]).
-    bwd_ops_raw, _ = _ops_to_moves(bm_b, j)
+    bwd_ops_raw, _, _ = _ops_to_moves(bm_b, j)
     bwd_ops: list[tuple[str, str | None]] = []
     bwd_moves: list[str] = []
     for op, name in reversed(bwd_ops_raw):
@@ -1281,7 +1779,8 @@ def costs_from_moves(moves: list[dict], threshold: float = 0.5,
                      c_del: float = C_DEL,
                      candidate_threshold: float | None = None,
                      del_floor: float = DEL_FLOOR,
-                     blend_adj: float = BLEND_ADJ) -> tuple:
+                     blend_adj: float = BLEND_ADJ,
+                     slice_gate: float = SLICE_GATE) -> tuple:
     """
     (pred_names, cost_rows, del_costs) from live_detect.analyse()'s move
     dicts — the one place the classifier softmax and the detector's onset
@@ -1303,6 +1802,18 @@ def costs_from_moves(moves: list[dict], threshold: float = 0.5,
     return pred_names, cost_rows, del_costs
 
 
+def slice_rows_from_moves(moves: list[dict],
+                          gate: float = SLICE_GATE) -> list[np.ndarray]:
+    """
+    Per-onset (12,) boolean mask of which classes may start a slice.
+
+    Kept separate from costs_from_moves so its three-value return stays a
+    stable interface for the callers that predate slices; pass the result to
+    decode(slice_rows=...) alongside slices=True.
+    """
+    return [slice_mask(np.asarray(m["probs"]), gate) for m in moves]
+
+
 # ---------------------------------------------------------------------------
 # Scoring a reconstruction against ground truth
 # ---------------------------------------------------------------------------
@@ -1321,16 +1832,24 @@ def score_vs_gt(gt: list[str], rec: list[str]) -> dict:
 
 def gt_path_cost(gt: list[str], pred_names: list[str],
                  cost_rows: list[np.ndarray],
-                 del_costs: np.ndarray, c_ins: float) -> float:
+                 del_costs: np.ndarray, c_ins: float,
+                 slices: bool = False, c_slice: float = C_SLICE) -> float:
     """
     Cost of the ground-truth story under the same model: align GT to the
     detected argmax sequence, then price each aligned op. Approximate
     (the alignment is unit-cost) but tight enough to tell "beam lost the
     truth" from "the model prefers a cheaper wrong answer".
+
+    With `slices`, a missed ground-truth move that is the slice partner of
+    an adjacent matched one is priced at c_slice rather than c_ins: the
+    decoder can reach it with a single OP_SLICE instead of an insertion, so
+    charging the full insertion would overstate the truth's cost by exactly
+    the amount OP_SLICE exists to save. Without this the metric would keep
+    reporting a gap the decoder no longer has to close.
     """
     ops = align_sequences(gt, pred_names)
     cost, j = 0.0, 0
-    for op, truth, _pred in ops:
+    for i, (op, truth, _pred) in enumerate(ops):
         if op == "ok" or op == "sub":
             cost += float(cost_rows[j][WCA12.index(truth)])
             j += 1
@@ -1338,7 +1857,15 @@ def gt_path_cost(gt: list[str], pred_names: list[str],
             cost += float(del_costs[j])
             j += 1
         else:  # miss
-            cost += c_ins
+            partnered = False
+            if slices and truth in WCA12:
+                want = WCA12[SLICE_PARTNER[WCA12.index(truth)]]
+                for nb in (i - 1, i + 1):
+                    if 0 <= nb < len(ops) and ops[nb][0] in ("ok", "sub") \
+                            and ops[nb][1] == want:
+                        partnered = True
+                        break
+            cost += c_slice if partnered else c_ins
     return cost
 
 
@@ -1619,25 +2146,30 @@ def confusion_breakdown(dirs: list[Path], args) -> dict:
 
 def _decode_dispatch(start: np.ndarray, end: np.ndarray,
                      cost_rows: list[np.ndarray], del_costs: np.ndarray,
-                     args, tables: dict, beam: int) -> dict:
+                     args, tables: dict, beam: int,
+                     slice_rows: list[np.ndarray] | None = None) -> dict:
     """
     Single-pass decode() (default) or D3 bidirectional (--bidir, optionally
     --meet-sweep) at the given `beam` — shared by run_sessions and any
     other caller that wants --bidir to be a drop-in swap for the existing
     decode() call, same args namespace, same retry-at-wider-beam pattern.
     """
+    slices = bool(getattr(args, "slices", False))
+    c_slice = float(getattr(args, "c_slice", C_SLICE))
     if not getattr(args, "bidir", False):
         return decode(start, cost_rows, beam=beam, c_del=args.del_cost,
                      c_ins=args.ins_cost, c_rot=args.rot_cost,
                      max_end_ins=args.max_end_ins,
                      rel_weight=args.rel_weight, del_costs=del_costs,
-                     rotations=args.rotations, tables=tables)
+                     rotations=args.rotations, tables=tables,
+                     slices=slices, c_slice=c_slice, slice_rows=slice_rows)
     if getattr(args, "rotations", False):
         sys.exit("--bidir does not support --rotations (see "
                  "decode_bidirectional's docstring)")
     kw = dict(beam=beam, c_del=args.del_cost, c_ins=args.ins_cost,
              c_rot=args.rot_cost, max_end_ins=args.max_end_ins,
-             rel_weight=args.rel_weight, tables=tables)
+             rel_weight=args.rel_weight, tables=tables,
+             slices=slices, c_slice=c_slice, slice_rows=slice_rows)
     if getattr(args, "meet_sweep", False):
         return decode_bidirectional_sweep(start, end, cost_rows, del_costs,
                                           **kw)
@@ -1702,7 +2234,9 @@ def run_sessions(args) -> None:
         if res["solved"]:
             rec = score_vs_gt(gt, res["moves"])
             gtc = gt_path_cost(gt, pred_names, cost_rows,
-                               del_costs, args.ins_cost)
+                               del_costs, args.ins_cost,
+                               bool(getattr(args, "slices", False)),
+                               float(getattr(args, "c_slice", C_SLICE)))
             row.update({"acc": rec["acc"], "exact": rec["exact"],
                         "cost": res["cost"], "gt_cost": gtc,
                         "ops": res["op_counts"]})
@@ -1995,6 +2529,134 @@ def run_selftest() -> None:
         check(f"recovers {label} exactly",
               res["solved"] and res["moves"] == gt)
 
+    # --- OP_SLICE ---------------------------------------------------------
+    # Table sanity first: the partner relation must be an involution, and
+    # both halves must compose to the same slice (they commute).
+    check("slice partner is an involution",
+          all(SLICE_PARTNER[SLICE_PARTNER[k]] == k for k in range(12)))
+    check("slice is the same from either half",
+          all((SLICE_VECS[k] == SLICE_VECS[SLICE_PARTNER[k]]).all()
+              for k in range(12)))
+    check("slice^4 = I",
+          all((seq_to_state([WCA12[k], WCA12[SLICE_PARTNER[k]]] * 4)
+               == SOLVED).all() for k in range(12)))
+
+    # The real case: a sequence containing a slice, where the camera saw
+    # only ONE onset for it. Without --slices this is a forced insertion;
+    # with it the decoder should recover the pair exactly.
+    rng3 = np.random.default_rng(23)
+    base = [WCA12[k] for k in _random_gt(rng3, 30)]
+    slice_at, k_slice = 12, WCA12.index("R")
+    gt_sl = (base[:slice_at] + ["R", "L'"] + base[slice_at:])
+    start_sl = start_from_gt(gt_sl)
+    obs_sl, sc_sl = [], []
+    rng4 = np.random.default_rng(5)
+    for i, name in enumerate(base):
+        if i == slice_at:                       # ONE onset for the slice
+            obs_sl.append(_fake_probs(rng4, k_slice, k_slice, 0.98))
+            sc_sl.append(0.9)
+        obs_sl.append(_fake_probs(rng4, WCA12.index(name),
+                                  WCA12.index(name), 0.98))
+        sc_sl.append(0.9)
+    rows_sl = [onset_costs(p) for p in obs_sl]
+    dc_sl = score_del_costs(sc_sl, 0.25)
+
+    # The gate must admit a genuinely bimodal onset and reject a confident
+    # one — this is what keeps OP_SLICE from being offered 12 ways at every
+    # onset (see SLICE_GATE).
+    bimodal = np.zeros(12)
+    bimodal[k_slice] = 0.55
+    bimodal[SLICE_PARTNER[k_slice]] = 0.40
+    bimodal[0] = 0.05
+    check("gate admits a bimodal slice onset",
+          bool(slice_mask(bimodal)[k_slice]))
+    check("gate rejects a confident single turn",
+          not slice_mask(_fake_probs(np.random.default_rng(1), k_slice,
+                                     k_slice, 0.98)).any())
+
+    res_off = decode(start_sl, rows_sl, beam=512, del_costs=dc_sl,
+                     tables=tables)
+    res_on = decode(start_sl, rows_sl, beam=512, del_costs=dc_sl,
+                    tables=tables, slices=True)
+    check("slices=True recovers a one-onset slice exactly",
+          res_on["solved"] and res_on["moves"] == gt_sl)
+    check("slices=True is cheaper here than slices=False",
+          res_on["solved"] and (not res_off["solved"]
+                                or res_on["cost"] < res_off["cost"]))
+
+    # Default-off must be bit-identical to the prior behaviour, on a case
+    # with no slice in it at all — this is the regression guard that says
+    # adding the transition changed nothing for existing callers.
+    rows_c, dc_c = corrupt(miss=True, inv=(12, 25))
+    a = decode(start, rows_c, beam=512, del_costs=dc_c, tables=tables)
+    b = decode(start, rows_c, beam=512, del_costs=dc_c, tables=tables,
+               slices=False)
+    check("slices=False matches the prior decode exactly",
+          a["solved"] == b["solved"] and a["moves"] == b["moves"]
+          and a["cost"] == b["cost"])
+
+    # -- OP_ALGO (ALGORITHM_PRIOR.md §7) ---------------------------------
+    #
+    # A cube needing only a T-perm: F2L complete, four last-layer pieces
+    # out. The detector drops FIVE of the fifteen onsets, which is well
+    # past what plain insertions can buy back at this beam — exactly the
+    # miss-heavy last-layer regime the transition exists for.
+    tperm = ["R", "U", "R'", "U'", "R'", "F", "R", "R",
+             "U'", "R'", "U'", "R", "U", "R'", "F'"]
+    t_labels = [WCA12.index(m) for m in tperm]
+    start_al = inverse(seq_to_state(tperm))
+    check("T-perm start has F2L complete", bool(f2l_complete(start_al).any()))
+    check("T-perm start is not solved", not (start_al == SOLVED).all())
+
+    kept = [i for i in range(len(tperm)) if i not in (2, 5, 8, 11, 13)]
+    rng_al = np.random.default_rng(11)
+    rows_al = [onset_costs(_fake_probs(rng_al, t_labels[i], t_labels[i],
+                                       0.98)) for i in kept]
+    dc_al = score_del_costs([0.9] * len(kept), 0.25)
+    cand = [{"start": 0, "k": len(kept), "labels": t_labels, "cost": 2.0}]
+
+    al_off = decode(start_al, rows_al, beam=512, del_costs=dc_al,
+                    tables=tables)
+    al_on = decode(start_al, rows_al, beam=512, del_costs=dc_al,
+                   tables=tables, algo_cands=cand)
+    check("OP_ALGO fills in the dropped onsets exactly",
+          al_on["solved"] and al_on["moves"] == tperm)
+    check("OP_ALGO actually fired",
+          al_on["solved"] and al_on["op_counts"].get("algorithm", 0) == 1)
+    check("OP_ALGO is cheaper than paying five insertions",
+          al_on["solved"] and (not al_off["solved"]
+                               or al_on["cost"] < al_off["cost"]))
+
+    # The gate is the abstract state, not the candidate list. Offering the
+    # same word from a cube whose F2L is broken must be refused outright —
+    # this is what stops 14 near-free multi-move jumps from flooding the
+    # beam the way ungated slices did.
+    broken = compose(start_al, CLASS_VECS[WCA12.index("R")])
+    check("F2L-broken state fails the abstract gate",
+          not bool(f2l_complete(broken).any()))
+    n_before = n_solved(start_al[None, :])[0]
+    check("applying the word makes strict progress",
+          n_solved(compose(start_al, seq_to_state(tperm))[None, :])[0]
+          > n_before)
+
+    # Default-off must be bit-identical, same guard as slices.
+    c_off = decode(start, rows_c, beam=512, del_costs=dc_c, tables=tables,
+                   algo_cands=None)
+    check("algo_cands=None matches the prior decode exactly",
+          a["solved"] == c_off["solved"] and a["moves"] == c_off["moves"]
+          and a["cost"] == c_off["cost"])
+
+    # A candidate whose word does NOT solve what it claims must not be
+    # taken just because it is cheap: the state gate refuses it.
+    sexy = ["R", "U", "R'", "U'", "R", "U", "R'"]
+    bogus = [{"start": 0, "k": len(kept), "cost": 0.1,
+              "labels": [WCA12.index(m) for m in sexy]}]
+    al_bad = decode(start_al, rows_al, beam=512, del_costs=dc_al,
+                    tables=tables, algo_cands=bogus)
+    check("a wrong cheap word does not hijack the decode",
+          (not al_bad["solved"]) or al_bad["moves"] == tperm
+          or al_bad["op_counts"].get("algorithm", 0) == 0)
+
     # D3 bidirectional (PATH_TO_VERIFICATION.md §5): clean sequence first —
     # this exercises the INV12 class-remapping and the reversed-order join
     # with no error-repair pressure to mask a mapping bug. Beam is small
@@ -2065,9 +2727,13 @@ if __name__ == "__main__":
     p.add_argument("--session", nargs="+",
                    help="Session folder(s) to replay + decode "
                         "(globs ok: ../training_data/solve_*/)")
-    p.add_argument("--detector", type=str, default="move_detector_all28.pt")
+    p.add_argument("--detector", type=str, default="checkpoints/move_detector_all28.pt")
     p.add_argument("--classifier", type=str,
-                   default="../move_classifier_all39_jitter.pt")
+                   default="../../legacy/move_classifier_rnd/move_classifier_all39_jitter.pt",
+                   help="the old ResNet-18 classifier track, archived "
+                        "2026-08-03 — this CLI entry point predates the "
+                        "joint/CTC models and is superseded by algo_sweep.py "
+                        "/ review.py, which import reconstruct.py directly")
     p.add_argument("--refresh-cache", action="store_true",
                    help="Re-run the replay even if a cache exists")
     p.add_argument("--beam", type=int, default=BEAM)
@@ -2076,6 +2742,16 @@ if __name__ == "__main__":
                         "(session mode only; set <= --beam to disable)")
     p.add_argument("--del-cost", type=float, default=C_DEL)
     p.add_argument("--ins-cost", type=float, default=C_INS)
+    p.add_argument("--slices", action="store_true",
+                   help="Let one onset decode as a middle-slice turn, "
+                        "emitting two layer moves. The smart cube reports a "
+                        "slice as two same-timestamp face events but the "
+                        "camera only ever sees one motion, so without this "
+                        "the second half is an unavoidable insertion. Off by "
+                        "default = exact prior behaviour.")
+    p.add_argument("--c-slice", type=float, default=C_SLICE, dest="c_slice",
+                   help="Cost of a slice reading, on top of the onset's own "
+                        "acceptance cost (default %(default)s)")
     p.add_argument("--rot-cost", type=float, default=C_ROT)
     p.add_argument("--max-end-ins", type=int, default=MAX_END_INS)
     p.add_argument("--candidate-threshold", type=float, default=None,

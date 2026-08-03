@@ -141,11 +141,22 @@ Don't let BLE work crowd out CV work without being asked.
   - `orientation_tracker.py` — maps cube-relative BLE move events (reported
     by center color) to camera-relative WCA notation via a virtual cube
     model, with IMU drift correction.
-  - `record_training.py` → `postprocess_session.py` → `train_move_classifier.py`
-    → `live_test.py` — the pipeline for recording BLE+webcam sessions,
-    aligning move timestamps to frames, training a ResNet-18 move
-    classifier on temporal diff images, and testing it live. Sessions land
-    in `ble/training_data/solve_<timestamp>/` (gitignored, large).
+  - `record_training.py` → `postprocess_session.py` → `move_detector/` — the
+    pipeline for recording BLE+webcam sessions, aligning move timestamps to
+    frames, and training/decoding moves. `train_move_classifier.py` (the
+    original ResNet-18-on-temporal-diff-images classifier) still lives at
+    `ble/` root because it's a live dependency of the current pipeline
+    (`move_detector/prepare_data.py`, `algorithms.py`, `live_detect.py`, and
+    `window_audit.py` all import shared constants from it and from its own
+    `encodings_move.py`), but its live-camera test harness (`live_test.py`)
+    and the rest of that first-generation R&D track have been superseded by
+    `move_detector/`'s joint/CTC pipeline and archived — see `legacy/` below.
+    Sessions land in `ble/training_data/solve_<timestamp>/` (gitignored,
+    large). `move_detector/` is the active R&D area (secondary priority per
+    above, but where most BLE-side work happens); see its own `README.md`
+    and `GAMEPLAN.md` for current pipeline/status, and its `checkpoints/`,
+    `results/<date>/`, `logs/<date>/`, `cache/` subfolders (reorganized
+    2026-08-03 out of ~150 flat files) for where generated artifacts live.
 
 - **`legacy/`** — superseded code, kept for reference, not part of the
   active pipeline:
@@ -160,6 +171,13 @@ Don't let BLE work crowd out CV work without being asked.
     script.
   - `hand_tracking_experiment/` — a `mediapipe` hand-tracking spike,
     unrelated to the current direction.
+  - `move_classifier_rnd/` — (archived 2026-08-03) the first-generation
+    ResNet-18 move classifier's encoding sweeps, optical-flow probes, live
+    test harness, and their checkpoints/logs — superseded by
+    `ble/move_detector/`'s joint/CTC pipeline. `train_move_classifier.py`
+    and `encodings_move.py` themselves stayed at `ble/` root (see above);
+    everything here imports them back via a `sys.path` bootstrap at each
+    file's top, matching the cross-topic-import convention under Setup.
 
 - **`docs/VISION.md`** — the full CubeArena product spec. Reference only.
 

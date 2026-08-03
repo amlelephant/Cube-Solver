@@ -113,6 +113,40 @@ def peak_pick(scores: np.ndarray, threshold: float = THRESHOLD,
     return np.array(sorted(accepted), dtype=int)
 
 
+def onset_collisions(gt_onset, min_sep: int = MIN_SEP) -> tuple[set, set]:
+    """
+    Ground-truth onsets too close together for the peak picker to report
+    separately. Returns (unresolvable, crowded) as sets of GT indices.
+
+    `unresolvable` — the two onsets are less than `min_sep` frames apart, so
+    peak_pick's refractory rule (`abs(i - j) >= min_sep`) can accept at most
+    ONE of them no matter how good the model is. One of the pair is a miss
+    by construction, and charging the detector for it measures the frame
+    rate, not the model. Measured 2026-07-30: 91 pairs, 3.9% of all recorded
+    moves, and on four sessions EVERY miss was one of these.
+
+    `crowded` — exactly `min_sep` frames apart. peak_pick permits both, but
+    only if the score curve dips between them, so these are hard rather than
+    impossible. Reported separately precisely because the distinction is
+    real: 143 pairs, 6.2% of moves.
+
+    The dominant source of both is the smart cube's 30ms notification tick
+    (two moves in one packet arrive with an identical timestamp) and, within
+    that, middle-slice turns, which are ONE physical motion the cube reports
+    as two face events. See GROUND_TRUTH_ARTIFACTS.md.
+    """
+    g = np.asarray(gt_onset, dtype=int)
+    unresolvable: set = set()
+    crowded: set = set()
+    for i in range(len(g) - 1):
+        gap = int(g[i + 1]) - int(g[i])
+        if gap < min_sep:
+            unresolvable.update((i, i + 1))
+        elif gap == min_sep:
+            crowded.update((i, i + 1))
+    return unresolvable, crowded - unresolvable
+
+
 def match_onsets(pred: np.ndarray, gt: np.ndarray, scores: np.ndarray | None = None,
                  tolerance: int = TOLERANCE) -> dict:
     """

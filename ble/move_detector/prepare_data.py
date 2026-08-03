@@ -35,10 +35,61 @@ Sessions where the cube is never detected fall back to a centered square
 crop, so a missing/failed detector degrades quality rather than blocking
 training.
 
+Where the onset labels come from
+--------------------------------
+`--labels ble` (the default, and the only behaviour that existed before
+2026-08-03) reads `moves.jsonl`: the smart cube's own move log, aligned to
+frames by wall-clock timestamp.
+
+`--labels review` reads `review_labels.json` — the output of review.py,
+where a human corrected the model's decode of a session that has no smart
+cube behind it at all. Two differences matter and are handled explicitly:
+
+  * The labels carry a FRAME INDEX, not just a timestamp, because a
+    reviewer placed them against the video. That index is used directly
+    instead of being round-tripped through `searchsorted`, so the
+    ~1-frame alignment noise the BLE path reports (and the 10.1% of BLE
+    moves that share a 30ms tick and are structurally unmatchable to a
+    distinct frame — GROUND_TRUTH_ARTIFACTS.md) simply does not arise.
+  * A reviewed session is only accepted when its label set REACHES SOLVED
+    from the scanned start state (`reaches_solved` in the file). That is
+    not a formality: an incomplete review is a label set with a move
+    missing from it, and a missing move is not a neutral omission — it
+    actively teaches the model not to fire there, which is the single
+    largest term in the measured error budget (see review.py). The group
+    theory is the only cheap certificate that nothing is missing, so it
+    gates the corpus. `--allow-unsolved` overrides, loudly.
+
+`--labels auto` prefers a reviewed file where one exists and falls back to
+BLE.
+
+`--labels none` writes a stream with NO onsets at all. That exists to break
+a circular dependency in the external-video path: review.py needs a scored
+posteriorgram, scoring needs `detector_stream_color.npz`, and building that
+stream normally needs the very labels the review is about to produce. An
+unlabelled stream is for INFERENCE ONLY and is poison in a training set —
+every frame of it is a negative, so it teaches the model that a whole
+session contains no moves. dataset.check_label_regime refuses one outright
+rather than trusting anybody to remember that.
+
+Which source was used travels WITH the stream as `label_source`, for
+exactly the reason `crop_mode` does — see dataset.check_label_regime.
+
+The external-video pipeline end to end:
+
+    python ingest_video.py --video take.mp4 --out ../captures
+    python prepare_data.py --sessions ../captures/take/ --color --labels none
+    python review.py --session ../captures/take/ --model checkpoints/move_ctc_aug44_s0.pt \\
+        --start-moves "<the scramble>"
+    python prepare_data.py --sessions ../captures/take/ --color \\
+        --labels review --force
+
 Usage:
     python prepare_data.py --sessions ../training_data/solve_*/
     python prepare_data.py --sessions ../training_data/solve_*/ --force
     python prepare_data.py --sessions ../training_data/solve_*/ --no-crop
+    python prepare_data.py --sessions ../captures/take_*/ --color \\
+        --labels review
 """
 
 import argparse
@@ -212,6 +263,76 @@ def build_color_stream(load_frame, boxes: np.ndarray, n_frames: int
     return out
 
 
+REVIEW_FILE = "review_labels.json"
+
+
+def load_review_labels(session_dir: Path, allow_unsolved: bool = False
+                       ) -> tuple[list[dict], dict] | None:
+    """
+    review.py's corrected labels -> (moves, provenance), or None.
+
+    `moves` comes back in the same shape prepare_session wants from
+    moves.jsonl — `timestamp` and `wca_notation` — plus a `frame` key the
+    caller prefers over the timestamp when it is present. See the module
+    docstring for why the solved gate is a gate and not a warning.
+    """
+    path = session_dir / REVIEW_FILE
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text())
+    moves = data.get("moves") or []
+    if not moves:
+        print(f"  {session_dir.name}: {REVIEW_FILE} has no moves, skipping")
+        return None
+
+    if not data.get("reaches_solved"):
+        note = data.get("completion", "unknown")
+        if not allow_unsolved:
+            print(f"  {session_dir.name}: review is INCOMPLETE "
+                  f"({note}) — refusing to prepare it.")
+            print(f"      A label set that does not reach solved has a move "
+                  f"missing or misnamed,")
+            print(f"      and a missing move trains the model NOT to fire "
+                  f"there. Finish the review")
+            print(f"      (python review.py --session {session_dir}) or pass "
+                  f"--allow-unsolved.")
+            return None
+        print(f"  {session_dir.name}: review does NOT reach solved ({note}) "
+              f"— proceeding on --allow-unsolved")
+
+    prov = {
+        "reviewer": data.get("reviewer", ""),
+        "reviewed_at": data.get("reviewed_at", ""),
+        "model": data.get("model", ""),
+        "decoder": data.get("decoder", ""),
+        "reaches_solved": bool(data.get("reaches_solved")),
+        "n_confirmed": sum(1 for m in moves if m.get("confirmed")),
+        "n_inserted": sum(1 for m in moves if m.get("source") == "inserted"),
+        "n_renamed": sum(1 for m in moves if m.get("source") == "renamed"),
+        "audit": data.get("audit", {}),
+    }
+    return moves, prov
+
+
+def class_name_of(move: dict) -> str | None:
+    """
+    The move name the VISION model must predict — camera-relative.
+
+    `camera_notation` is written by ble/backfill_camera_frame.py (and, for
+    new sessions, by the recorder). `wca_notation` is the CUBE-frame name,
+    which differs from it after a middle-slice turn rotates the centres:
+    the cube reports a turn of the physically-top face as `D` once a slice
+    has carried the bottom centre up there, and the camera correctly sees
+    `U`. Training a camera model on the cube-frame name is the bug this
+    exists to close — see ble/slice_frame.py.
+
+    Falls back to `wca_notation` so a session that predates the backfill
+    still prepares; `label_frame` in the stream records which was used, and
+    prepare_session warns rather than letting the fallback be silent.
+    """
+    return move.get("camera_notation") or move.get("wca_notation")
+
+
 def _wca_class_index() -> dict:
     """WCA move name -> 0-11, matching reconstruct.WCA12 / train_move_
     classifier.WCA_CLASS_NAMES exactly (imported so Stage A's onset_class
@@ -221,7 +342,8 @@ def _wca_class_index() -> dict:
 
 
 def prepare_session(session_dir: Path, detector, force: bool = False,
-                    color: bool = False) -> bool:
+                    color: bool = False, labels: str = "ble",
+                    allow_unsolved: bool = False) -> bool:
     out_path = session_dir / (STREAM_FILE_COLOR if color else STREAM_FILE)
     if out_path.exists() and not force:
         print(f"  {session_dir.name}: {out_path.name} exists, skipping "
@@ -231,6 +353,18 @@ def prepare_session(session_dir: Path, detector, force: bool = False,
     frames_dir = session_dir / "frames"
     frames_idx = session_dir / "frames.jsonl"
     moves_path = session_dir / "moves.jsonl"
+
+    # -- where the labels come from (see the module docstring)
+    review, label_prov, label_source = None, {}, "ble"
+    if labels == "none":
+        label_source, moves_src = "none", []
+    elif labels in ("review", "auto"):
+        review = load_review_labels(session_dir, allow_unsolved)
+        if review is None and labels == "review":
+            return False
+    if review is not None:
+        moves_src, label_prov = review
+        label_source = "review"
 
     if not frames_dir.is_dir() or not any(frames_dir.iterdir()):
         print(f"  {session_dir.name}: no frames/ — SKIPPED.")
@@ -242,13 +376,21 @@ def prepare_session(session_dir: Path, detector, force: bool = False,
               f"Re-record.")
         return False
 
-    if not frames_idx.exists() or not moves_path.exists():
-        print(f"  {session_dir.name}: missing frames.jsonl or moves.jsonl, "
-              f"skipping")
+    if not frames_idx.exists():
+        print(f"  {session_dir.name}: missing frames.jsonl, skipping")
+        return False
+    if label_source == "none" and not color:
+        print(f"  {session_dir.name}: --labels none only makes sense with "
+              f"--color (the grayscale stream has no inference-only use)")
+        return False
+    if label_source == "ble" and not moves_path.exists():
+        print(f"  {session_dir.name}: missing moves.jsonl and no usable "
+              f"{REVIEW_FILE}, skipping")
         return False
 
     frame_recs = load_jsonl(frames_idx)
-    moves      = load_jsonl(moves_path)
+    moves = (moves_src if label_source in ("review", "none")
+             else load_jsonl(moves_path))
 
     paths = [frames_dir / r["file"] for r in frame_recs]
     keep  = [i for i, p in enumerate(paths) if p.exists()]
@@ -291,19 +433,58 @@ def prepare_session(session_dir: Path, detector, force: bool = False,
             lambda i: cv2.imread(str(paths[i]), cv2.IMREAD_GRAYSCALE),
             boxes, n)
 
-    # Map each BLE move timestamp to its nearest frame index
-    move_ts   = np.array([m["timestamp"] for m in moves], dtype=np.float64)
-    onset_idx = np.clip(np.searchsorted(ts, move_ts), 0, n - 1)
-    left      = np.clip(onset_idx - 1, 0, n - 1)
-    take_left = np.abs(ts[left] - move_ts) < np.abs(ts[onset_idx] - move_ts)
-    onset_idx = np.where(take_left, left, onset_idx).astype(np.int32)
+    # Map each move to a frame index. A reviewed label already IS one (a
+    # human placed it against this video), so it is used directly; a BLE
+    # move is a wall-clock timestamp and has to be matched to the nearest
+    # frame, which is where the alignment noise below comes from.
+    move_ts = np.array([m["timestamp"] for m in moves], dtype=np.float64)
+    if label_source == "none":
+        onset_idx = np.array([], dtype=np.int32)
+        move_ts = np.array([], dtype=np.float64)
+        align_ms = np.array([0.0])
+    elif label_source == "review":
+        # Resolve by FILENAME, not by index. review.py records both, and
+        # the filename is the one that survives frames being added or
+        # removed between the review and this run; an index would shift
+        # silently and slide every label off its onset, with nothing in
+        # the .npz to show it (the WORD stays right, only its alignment
+        # goes wrong — the one corruption the solved gate cannot catch).
+        by_file = {r["file"]: i for i, r in enumerate(frame_recs)}
+        onset_idx, unresolved = [], 0
+        for m in moves:
+            i = by_file.get(m.get("frame_file"))
+            if i is None:
+                i = int(np.clip(m.get("frame", 0), 0, n - 1))
+                unresolved += 1
+            onset_idx.append(i)
+        onset_idx = np.array(onset_idx, dtype=np.int32)
+        align_ms = np.zeros(len(onset_idx))
+        if unresolved:
+            print(f"      NOTE: {unresolved} reviewed label(s) had no "
+                  f"resolvable frame_file; fell back to the stored index")
+    else:
+        onset_idx = np.clip(np.searchsorted(ts, move_ts), 0, n - 1)
+        left      = np.clip(onset_idx - 1, 0, n - 1)
+        take_left = np.abs(ts[left] - move_ts) < np.abs(ts[onset_idx] - move_ts)
+        onset_idx = np.where(take_left, left, onset_idx).astype(np.int32)
+        align_ms = np.abs(ts[onset_idx] - move_ts) * 1000
 
-    align_ms = np.abs(ts[onset_idx] - move_ts) * 1000
-    dupes    = len(onset_idx) - len(np.unique(onset_idx))
+    # Onsets must be ascending for the crowding stats and for the dense
+    # targets built from them; a reviewer inserting a move keeps the list
+    # sorted by frame, but an inserted move can legitimately land on the
+    # same frame as its neighbour.
+    order = np.argsort(onset_idx, kind="stable")
+    onset_idx, move_ts, align_ms = onset_idx[order], move_ts[order], align_ms[order]
+    moves = [moves[i] for i in order]
+
+    dupes = len(onset_idx) - len(np.unique(onset_idx))
 
     extra = {}
     n_unresolved = 0
-    if color:
+    label_frame = "camera" if label_source == "review" else "n/a"
+    if color and label_source == "none":
+        extra = {"onset_class": np.array([], dtype=np.int32)}
+    elif color:
         # Stage A's class head needs a WCA index per onset. Onsets whose
         # move could not be resolved to a quarter turn (half-turns the
         # tracker coalesced, or a dropped BLE decode — see ble_truth.py's
@@ -314,15 +495,18 @@ def prepare_session(session_dir: Path, detector, force: bool = False,
         # onset_class would desync the two arrays' meaning.
         wca_idx = _wca_class_index()
         resolved = [i for i, m in enumerate(moves)
-                   if m.get("wca_notation") in wca_idx]
+                   if class_name_of(m) in wca_idx]
         n_unresolved = len(moves) - len(resolved)
         onset_idx = onset_idx[resolved]
         move_ts = move_ts[resolved]
         align_ms = align_ms[resolved]
         onset_class = np.array(
-            [wca_idx[moves[i]["wca_notation"]] for i in resolved],
+            [wca_idx[class_name_of(moves[i])] for i in resolved],
             dtype=np.int32)
         extra = {"onset_class": onset_class}
+        n_camera_frame = sum(1 for m in moves if m.get("camera_notation"))
+        label_frame = ("camera" if label_source == "review"
+                       or n_camera_frame == len(moves) else "cube")
 
     # crop_mode / crop_margin travel WITH the stream. The classifier had
     # exactly this hole until 2026-07-25 — a mix of cropped and full-frame
@@ -330,17 +514,44 @@ def prepare_session(session_dir: Path, detector, force: bool = False,
     # would be worse, because the .npz is a black box of 96x96 pixels that
     # nobody can eyeball. dataset.py refuses a mixed set on the strength of
     # these two fields.
+    # label_source travels with the stream for the same reason crop_mode
+    # does: a corpus that silently mixes smart-cube ground truth with
+    # human-reviewed labels is a corpus nobody can characterise afterwards.
+    # Unlike crop_mode this is NOT refused when mixed (see dataset.
+    # check_label_regime) — growing the corpus with reviewed sessions is
+    # the point — but it must be visible.
     np.savez_compressed(out_path, frames=out, onset_idx=onset_idx,
                         onset_ts=move_ts, fps=fps, name=session_dir.name,
                         crop_mode=crop_mode,
                         crop_margin=(CROP_MARGIN if n_det else -1.0),
-                        n_detections=n_det, **extra)
+                        n_detections=n_det, label_source=label_source,
+                        label_frame=label_frame,
+                        label_meta=json.dumps(label_prov), **extra)
 
     size_mb = out_path.stat().st_size / 1e6
     print(f"  {session_dir.name}: {n} frames, {len(onset_idx)} onsets"
           + (f" ({n_unresolved} unresolved dropped)" if n_unresolved else "")
           + f", {fps:.1f}fps, {size_mb:.0f}MB")
     print(f"      crop: {crop_note}  [{crop_mode}]")
+    if label_source == "review":
+        a = label_prov.get("audit") or {}
+        print(f"      labels: HUMAN REVIEW by "
+              f"{label_prov.get('reviewer') or '(unnamed)'} on "
+              f"{label_prov.get('reviewed_at', '?')}, "
+              f"model {label_prov.get('model', '?')}")
+        print(f"              {label_prov['n_confirmed']} confirmed, "
+              f"{label_prov['n_renamed']} renamed, "
+              f"{label_prov['n_inserted']} inserted; reaches solved: "
+              f"{label_prov['reaches_solved']}")
+        blind, sighted = a.get("blind_agreement"), a.get("sighted_agreement")
+        if blind is not None:
+            print(f"              blind audit {blind*100:.0f}% over "
+                  f"{a.get('n_blind_answered', 0)} hidden move(s)"
+                  + (f", sighted {sighted*100:.0f}%" if sighted is not None
+                     else ""))
+        elif a.get("n_in_head_unconfirmed"):
+            print(f"              NOTE: {a['n_in_head_unconfirmed']} label(s) "
+                  f"inside the review head were never individually confirmed")
     if crop_mode != "cropped":
         print(f"      WARNING: this stream is NOT cube-cropped. Live "
               f"inference always crops, so")
@@ -348,8 +559,52 @@ def prepare_session(session_dir: Path, detector, force: bool = False,
               f"train.py will refuse the")
         print(f"               mixed set. Fix the detector and re-run with "
               f"--force.")
-    print(f"      onset->frame alignment: median {np.median(align_ms):.0f}ms, "
-          f"max {align_ms.max():.0f}ms")
+    if color and label_frame == "cube":
+        print(f"      WARNING: onset_class came from the CUBE-frame "
+              f"wca_notation. After a middle-slice")
+        print(f"               turn that names the wrong face — see "
+              f"ble/slice_frame.py. Run:")
+        print(f"                   python ble/backfill_camera_frame.py "
+              f"--sessions {session_dir}")
+        print(f"               then re-prepare with --force.")
+    if label_source == "none":
+        print(f"      labels: NONE — inference-only stream. Review it, then "
+              f"re-prepare with")
+        print(f"              --labels review --force. Training on it is "
+              f"refused (check_label_regime).")
+    elif label_source == "review":
+        print(f"      onset->frame alignment: exact (reviewed labels carry "
+              f"frame indices)")
+    else:
+        print(f"      onset->frame alignment: median "
+              f"{np.median(align_ms):.0f}ms, max {align_ms.max():.0f}ms")
+
+    # Solve SPEED, reported because it drifted unmonitored for two weeks and
+    # turned out to be a third regime axis next to time-of-day and recording
+    # day: 1.30 -> 2.83 moves/s between 07-21 and 08-02, with adjacent-onset
+    # crowding rising 0.9% -> 18%. That gap is most of what separates the
+    # training corpus from the held-out set, and it was being read as
+    # cross-day generalisation. See GAMEPLAN.md §1b.
+    #
+    # Two different numbers, and conflating them overstates the damage.
+    # Crowded pairs are merely HARD. Only a crowded pair of the SAME class
+    # is structurally unreachable, because CTC cannot emit a repeated label
+    # without an intervening blank frame (ctc_decode.py) — that one is a
+    # floor no model or decoder gets under.
+    if len(onset_idx) > 1:
+        order = np.argsort(onset_idx)
+        oi = onset_idx[order]
+        gaps = np.diff(oi)
+        crowded = int((gaps <= 2).sum())
+        same = 0
+        if "onset_class" in extra:
+            oc = extra["onset_class"][order]
+            same = int(sum(1 for i, g in enumerate(gaps)
+                           if g <= 2 and oc[i] == oc[i + 1]))
+        rate = len(oi) / (n / fps)
+        print(f"      speed: {rate:.2f} moves/s; {crowded} crowded pair(s) "
+              f"<=2 frames ({100 * crowded / len(oi):.1f}%), "
+              f"{same} same-class ({100 * same / len(oi):.2f}% — CTC floor)")
     if dupes:
         print(f"      NOTE: {dupes} onset(s) share a frame with another — "
               f"two-handed simultaneous")
@@ -441,6 +696,22 @@ if __name__ == "__main__":
                              "grayscale-only detector_stream.npz. The two "
                              "are independent files; this never touches "
                              "the shipped stream.")
+    parser.add_argument("--labels",
+                        choices=("ble", "review", "auto", "none"),
+                        default="ble",
+                        help="Where onset labels come from: 'ble' = "
+                             "moves.jsonl (default, the shipped behaviour), "
+                             "'review' = review_labels.json from review.py, "
+                             "'auto' = a reviewed file when one exists, else "
+                             "BLE, 'none' = no onsets at all, for scoring an "
+                             "unlabelled video before it has been reviewed "
+                             "(inference only; training on it is refused). "
+                             "See the module docstring.")
+    parser.add_argument("--allow-unsolved", action="store_true",
+                        help="Accept a reviewed session whose labels do not "
+                             "reach solved. They have a move missing or "
+                             "misnamed; a missing move actively trains the "
+                             "model not to fire there.")
     args = parser.parse_args()
 
     session_dirs = [Path(p) for pattern in args.sessions
@@ -479,8 +750,12 @@ if __name__ == "__main__":
                   "         the input. Pass --no-crop to silence this.\n")
 
     print(f"\nPreparing {len(session_dirs)} session(s)"
-          + (" [--color: Stage A stream]" if args.color else "") + "...")
-    ok = sum(prepare_session(d, detector, force=args.force, color=args.color)
+          + (" [--color: Stage A stream]" if args.color else "")
+          + (f" [labels: {args.labels}]" if args.labels != "ble" else "")
+          + "...")
+    ok = sum(prepare_session(d, detector, force=args.force, color=args.color,
+                             labels=args.labels,
+                             allow_unsolved=args.allow_unsolved)
              for d in sorted(session_dirs))
     print(f"\nDone: {ok}/{len(session_dirs)} session(s) ready.")
     if ok == 0:

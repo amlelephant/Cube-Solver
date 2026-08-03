@@ -39,6 +39,15 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+# Archived 2026-08-03 from ble/ into legacy/move_classifier_rnd/ — this and
+# train_move_classifier.py's other dependents still live at ble/ root
+# (train_move_classifier.py is a live import for the current pipeline), so
+# reaching them now needs an explicit bootstrap rather than the same-folder
+# default sys.path[0].
+_BLE_DIR = Path(__file__).resolve().parents[2] / "ble"
+if str(_BLE_DIR) not in sys.path:
+    sys.path.insert(0, str(_BLE_DIR))
+
 import encodings_move as enc_mod
 from encodings_move import ENCODINGS, hue_sweep, preview, time_legend
 from train_move_classifier import (FRAME_ORDER, MoveDiffDataset,

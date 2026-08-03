@@ -83,16 +83,38 @@ async def _ble_session(args, session_dir: Path, tracker: OrientationTracker,
             print("\n  Getting end state...")
             end_obj = await cube.get_state()
             end_str = end_obj.to_kociemba() if end_obj else None
-            print(f"  End:     {end_str or '(unknown)'}")
+            print(f"  End (as the cube reports it): {end_str or '(unknown)'}")
 
     except Exception as e:
         error_bucket.append(e)
     finally:
         _stop_event.set()
+        # The cube's own state report is NOT ground truth and must not be
+        # recorded under a name that reads like it is.
+        #
+        # The cube tracks its state internally and that tracking drifts — a
+        # flat battery does it, and on 2026-07-23 a cube at 0% battery
+        # reported a constant 36 facelets wrong while emitting phantom
+        # moves. A solve session ends solved by construction of the
+        # exercise, so a report of NOT SOLVED at the end of one is evidence
+        # about the cube, not about the solve.
+        #
+        # Nothing downstream consumes these fields — every decode targets
+        # the solved state and builds its start state from the move word
+        # (reconstruct.start_from_gt, verify_joint.decode_moves,
+        # session_check.check_pair) — so the honest fix is to label them as
+        # the claim they are and point at the check that is actually load
+        # bearing.
         with open(session_dir / "ble_meta.json", "w") as f:
             json.dump({
-                "start_state": start_str,
-                "end_state":   end_str,
+                "cube_reported_start_state": start_str,
+                "cube_reported_end_state":   end_str,
+                "end_state_trusted":         False,
+                "end_state_note": (
+                    "The cube's own state tracking, not an observation. A "
+                    "solve session ends solved by construction; check the "
+                    "MOVE WORD instead with session_check.py, which applies "
+                    "it to a solved cube and asserts it returns there."),
                 "battery":     battery,
                 "move_count":  move_count,
             }, f, indent=2)

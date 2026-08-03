@@ -58,6 +58,12 @@ try:
 except ImportError:
     sys.exit("PyTorch not installed.")
 
+# Archived 2026-08-03 from ble/ into legacy/move_classifier_rnd/ — see
+# viz_encodings.py's identical bootstrap comment for why this is needed.
+_BLE_DIR = Path(__file__).resolve().parents[2] / "ble"
+if str(_BLE_DIR) not in sys.path:
+    sys.path.insert(0, str(_BLE_DIR))
+
 from train_move_classifier import (MoveDiffDataset, build_model, _load_state,
                                    ckpt_encoding, LABEL_MODES)
 from encodings_move import get as get_encoding

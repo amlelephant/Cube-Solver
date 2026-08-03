@@ -13,7 +13,7 @@ Completely parallel to train.py, not a modification of it: reads
 detector_stream_color.npz (prepare_data.py --color) instead of the
 deployed detector_stream.npz, builds model.build_joint_model() instead of
 build_model(), and writes its own checkpoint file. Nothing here can affect
-the shipped move_detector_all28.pt / move_classifier_all39_jitter.pt
+the shipped checkpoints/move_detector_all28.pt / move_classifier_all39_jitter.pt
 pair.
 
 Loss: per-frame BCE on the onset head (unchanged) + soft-label cross-
@@ -36,9 +36,9 @@ Usage:
     python train_joint.py --sessions ../training_data/solve_*/ \\
         --val-session-names solve_20260721_102711 solve_20260722_101225 \\
         solve_20260723_105530_solve solve_20260724_100120_solve \\
-        --seed 0 --output move_joint_seed0.pt
+        --seed 0 --output checkpoints/move_joint_seed0.pt
     python train_joint.py --sessions ../training_data/solve_*/ --eval \\
-        --model move_joint_seed0.pt
+        --model checkpoints/move_joint_seed0.pt
 """
 
 import argparse
@@ -62,8 +62,10 @@ except ImportError:
     sys.exit("PyTorch not installed. Run: pip install torch torchvision")
 
 from dataset import (JointSessionStream, JointClipDataset, load_joint_streams,
-                     split_streams, check_crop_regime, CLIP_LEN, SIGMA)
-from model import build_joint_model, score_stream_joint
+                     split_streams, check_crop_regime, check_label_regime,
+                     seed_worker,
+                     CLIP_LEN, SIGMA, COUNT_RADIUS, COUNT_CLASSES)
+from model import build_joint_model, build_joint_from_ckpt, score_stream_joint
 from decode import peak_pick, match_onsets, sweep_threshold, format_metrics, \
     MIN_SEP, THRESHOLD, TOLERANCE, BETA
 
@@ -119,12 +121,15 @@ def evaluate_streams(model, streams: list[JointSessionStream], device,
     fp = fn = 0
     errs = []
     n_onset_w, at_onset_sum, frame_bg_w, frame_bg_sum = 0, 0.0, 0, 0.0
+    cnt_acc = []
 
     for s in streams:
-        onset_prob, class_prob = score_stream_joint(model, s, device)
+        onset_prob, class_prob, count_prob = score_stream_joint(model, s, device)
         pred = peak_pick(onset_prob, threshold=threshold, min_sep=min_sep)
         m = match_onsets(pred, s.onset_idx, onset_prob, tolerance)
         acc = class_accuracy(class_prob, s)
+        acc.update(count_accuracy(count_prob, s))
+        cnt_acc.append(acc)
         per_session.append((s.name, m, acc))
         tp, fp, fn = tp + m["tp"], fp + m["fp"], fn + m["fn"]
         if not np.isnan(m["median_err"]):
@@ -145,16 +150,78 @@ def evaluate_streams(model, streams: list[JointSessionStream], device,
           "bias": float("nan"),
           "at_onset": at_onset_sum / n_onset_w if n_onset_w else float("nan"),
           "frame_bg": frame_bg_sum / frame_bg_w if frame_bg_w else float("nan")}
+    for k in ("count2_recall", "count2_prec", "pair_recall"):
+        vals = [a[k] for a in cnt_acc if not np.isnan(a[k])]
+        agg[k] = float(np.mean(vals)) if vals else float("nan")
     return agg, per_session
 
 
 def joint_loss(onset_logits, class_logits, y_onset, y_class,
-              class_weight: float, onset_criterion) -> torch.Tensor:
-    """BCE(onset) + class_weight * soft-label CE(class), per-frame mean."""
+              class_weight: float, onset_criterion,
+              count_logits=None, y_count=None, count_weight: float = 0.0,
+              count_criterion=None):
+    """BCE(onset) + class_weight * soft-label CE(class), per-frame mean,
+    plus count_weight * hard-label CE(count) when the count head is on."""
     onset_l = onset_criterion(onset_logits, y_onset)
     log_p = torch.log_softmax(class_logits, dim=-1)     # (B, T, 13)
     class_l = -(y_class * log_p).sum(dim=-1).mean()
-    return onset_l + class_weight * class_l, onset_l.item(), class_l.item()
+    total = onset_l + class_weight * class_l
+    count_v = 0.0
+    if count_logits is not None:
+        count_l = count_criterion(count_logits.reshape(-1, COUNT_CLASSES),
+                                  y_count.reshape(-1))
+        total = total + count_weight * count_l
+        count_v = count_l.item()
+    return total, onset_l.item(), class_l.item(), count_v
+
+
+def count_class_weights(streams, device) -> torch.Tensor:
+    """
+    Inverse-frequency weights for the count head's 3-way CE.
+
+    Necessary, not cosmetic: at COUNT_RADIUS=2 the target is 76.2% / 21.7%
+    / 2.0% across the prepared sessions, and unweighted CE on a 2% class
+    collapses to never predicting it — which would make the head a no-op
+    dressed up as a measurement. Weights are normalised to mean 1 so
+    count_weight stays comparable to class_weight.
+    """
+    counts = np.zeros(COUNT_CLASSES, dtype=np.float64)
+    for s in streams:
+        counts += np.bincount(s.count_target, minlength=COUNT_CLASSES)
+    freq = counts / max(counts.sum(), 1)
+    w = 1.0 / np.maximum(freq, 1e-6)
+    w = w / w.mean()
+    return torch.tensor(w, dtype=torch.float32, device=device), counts
+
+
+def count_accuracy(count_prob: np.ndarray, stream) -> dict:
+    """
+    Per-frame count metrics, reported separately for the rare class
+    because overall accuracy is ~98% for a head that never predicts 2.
+
+    count2_recall   of frames whose TRUE count is 2, how many are called 2
+    count2_prec     of frames CALLED 2, how many truly are
+    pair_recall     of true onset PAIRS within COUNT_RADIUS of each other,
+                    how many have at least one frame called 2 between them
+                    — the number that actually bounds what the decoder can
+                    recover, since one flagged frame is enough to split a
+                    peak (see joint_decode.posteriorgram_to_moves)
+    """
+    if count_prob is None:
+        return {"count2_recall": float("nan"), "count2_prec": float("nan"),
+                "pair_recall": float("nan")}
+    pred = count_prob.argmax(axis=1)
+    true = stream.count_target
+    t2, p2 = (true >= 2), (pred >= 2)
+    rec = float(p2[t2].mean()) if t2.any() else float("nan")
+    prec = float(t2[p2].mean()) if p2.any() else float("nan")
+
+    idx = np.sort(stream.onset_idx)
+    pairs = [(a, b) for a, b in zip(idx[:-1], idx[1:])
+             if b - a <= 2 * stream.count_radius]
+    hit = sum(1 for a, b in pairs if p2[a:b + 1].any())
+    return {"count2_recall": rec, "count2_prec": prec,
+            "pair_recall": hit / len(pairs) if pairs else float("nan")}
 
 
 def report_data(train_s, val_s):
@@ -209,12 +276,14 @@ def train(args):
 
     torch.manual_seed(args.seed)
 
-    streams = load_joint_streams(session_dirs, sigma=args.sigma)
+    streams = load_joint_streams(session_dirs, sigma=args.sigma,
+                                 count_radius=args.count_radius)
     if not streams:
         sys.exit("No prepared colour sessions. Run "
                  "`prepare_data.py --color` first.")
 
     crop_regime = check_crop_regime(streams, allow_mixed=args.allow_uncropped)
+    label_regime = check_label_regime(streams)
 
     train_s, val_s = split_streams(streams, args.val_sessions,
                                    val_names=args.val_session_names,
@@ -223,13 +292,19 @@ def train(args):
 
     train_ds = JointClipDataset(train_s, clip_len=args.clip_len,
                                 stride=args.stride, augment=True,
-                                seed=args.seed)
+                                seed=args.seed,
+                                aug_strength=args.aug_strength)
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
                               num_workers=args.workers, drop_last=True,
+                              worker_init_fn=seed_worker if args.workers else None,
+                              persistent_workers=bool(args.workers),
+                              pin_memory=True,
                               generator=torch.Generator().manual_seed(args.seed))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model  = build_joint_model(device, dropout=args.dropout)
+    n_counts = COUNT_CLASSES if args.count_head else None
+    model  = build_joint_model(device, dropout=args.dropout,
+                               n_counts=n_counts)
     n_par  = sum(p.numel() for p in model.parameters())
 
     print(f"\n  Clips: {len(train_ds)} of {args.clip_len} frames "
@@ -242,10 +317,32 @@ def train(args):
           f"min_sep={args.min_sep} tol=+/-{args.tolerance}f")
 
     onset_criterion = nn.BCEWithLogitsLoss()
+    count_criterion = None
+    if args.count_head:
+        cw, cdist = count_class_weights(train_s, device)
+        count_criterion = nn.CrossEntropyLoss(weight=cw)
+        share = 100 * cdist / max(cdist.sum(), 1)
+        print(f"  Count head: radius={args.count_radius} "
+              f"(+/-{args.count_radius}f = "
+              f"{(2*args.count_radius+1)*1000/30:.0f}ms bin), "
+              f"count_weight={args.count_weight:g}")
+        print(f"              train target 0/1/2+ = {share[0]:.1f}% / "
+              f"{share[1]:.1f}% / {share[2]:.2f}%, "
+              f"CE weights {cw[0]:.2f}/{cw[1]:.2f}/{cw[2]:.2f}")
+
     optimizer = optim.AdamW(model.parameters(), lr=args.lr,
                             weight_decay=args.weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs, eta_min=1e-6)
+
+    # Mixed precision, measured 1.7x on this model (119 -> 71 ms/clip). The
+    # encoder is memory-bandwidth bound on 768 frames of 96x96 activations
+    # per batch, not FLOP bound, which is why fp16 helps and channels_last
+    # does not (it is measurably WORSE here — the (B,T,C,H,W) flatten
+    # defeats it).
+    amp = device.type == "cuda" and not args.no_amp
+    torch.backends.cudnn.benchmark = True
+    scaler = torch.amp.GradScaler("cuda", enabled=amp)
 
     best_f1, best_epoch = 0.0, 0
     out_path = Path(args.output)
@@ -256,32 +353,48 @@ def train(args):
 
     for epoch in range(1, args.epochs + 1):
         model.train()
-        total, total_o, total_c, count = 0.0, 0.0, 0.0, 0
-        for x, y_onset, y_class in train_loader:
+        total, total_o, total_c, total_n, count = 0.0, 0.0, 0.0, 0.0, 0
+        for x, y_onset, y_class, y_count in train_loader:
             x, y_onset, y_class = (x.to(device), y_onset.to(device),
                                    y_class.to(device))
             optimizer.zero_grad()
-            onset_logits, class_logits = model(x)
-            loss, lo, lc = joint_loss(onset_logits, class_logits, y_onset,
-                                      y_class, args.class_weight,
-                                      onset_criterion)
-            loss.backward()
-            optimizer.step()
+            with torch.amp.autocast("cuda", enabled=amp):
+                out = model(x)
+            # Losses in fp32: the encoder is the expensive part and the only
+            # part autocast is for, while soft-label CE over a 13-way
+            # softmax is exactly the kind of small reduction fp16 rounds
+            # badly.
+            onset_logits, class_logits = out[0].float(), out[1].float()
+            count_logits = out[2].float() if args.count_head else None
+            loss, lo, lc, ln = joint_loss(
+                onset_logits, class_logits, y_onset, y_class,
+                args.class_weight, onset_criterion,
+                count_logits=count_logits,
+                y_count=y_count.to(device) if args.count_head else None,
+                count_weight=args.count_weight,
+                count_criterion=count_criterion)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             bs = x.size(0)
             total += loss.item() * bs
             total_o += lo * bs
             total_c += lc * bs
+            total_n += ln * bs
             count += bs
         scheduler.step()
 
         agg, _ = evaluate_streams(model, val_s, device, args.threshold,
                                   args.min_sep, args.tolerance)
         marker = " <- best" if agg["f1"] > best_f1 else ""
+        cnt_col = (f" pair_R {agg['pair_recall']*100:5.1f}%"
+                   if args.count_head else "")
         print(f"  {epoch:<6} {total/max(count,1):<9.4f} "
-              f"({total_o/max(count,1):.3f}/{total_c/max(count,1):.3f}) "
+              f"({total_o/max(count,1):.3f}/{total_c/max(count,1):.3f}"
+              f"{'/'+format(total_n/max(count,1),'.3f') if args.count_head else ''}) "
               f"{agg['f1']*100:<8.1f}% {agg['precision']*100:<7.1f}% "
               f"{agg['recall']*100:<7.1f}% {agg['at_onset']*100:<9.1f}% "
-              f"{agg['frame_bg']*100:.1f}%{marker}")
+              f"{agg['frame_bg']*100:.1f}%{cnt_col}{marker}")
 
         if agg["f1"] > best_f1:
             best_f1, best_epoch = agg["f1"], epoch
@@ -295,6 +408,8 @@ def train(args):
                 "val_session_names": [s.name for s in val_s],
                 "train_session_names": [s.name for s in train_s],
                 "crop_regime": crop_regime,
+                "label_regime": label_regime,
+                "aug_strength": args.aug_strength,
                 "sigma": args.sigma,
                 "class_weight": args.class_weight,
                 "clip_len": args.clip_len,
@@ -305,6 +420,10 @@ def train(args):
                 "model_type": "joint",
                 "in_channels": model.encoder.net[0].in_channels,
                 "n_classes": model.n_classes,
+                "n_counts": model.n_counts,
+                "count_radius": args.count_radius,
+                "count_weight": args.count_weight,
+                "val_pair_recall": agg["pair_recall"],
             }, out_path)
 
         if epoch - best_epoch >= args.patience:
@@ -333,6 +452,7 @@ def train(args):
     ckpt["val_f1"] = agg["f1"]
     ckpt["val_at_onset"] = agg["at_onset"]
     ckpt["val_frame_bg"] = agg["frame_bg"]
+    ckpt["val_pair_recall"] = agg["pair_recall"]
     ckpt["beta"] = args.beta
     torch.save(ckpt, out_path)
 
@@ -368,9 +488,7 @@ def evaluate(args):
         print(f"\nSkipping {len(train_s)} training session(s) "
               f"(pass --allow-train-sessions to include them)")
 
-    model = build_joint_model(device, in_channels=ckpt.get("in_channels", 4),
-                              n_classes=ckpt.get("n_classes", 13))
-    model.load_state_dict(ckpt["state_dict"])
+    model = build_joint_from_ckpt(ckpt, device)
     threshold = ckpt.get("threshold", THRESHOLD)
 
     print(f"\nLoaded {args.model} (epoch {ckpt['epoch']}, seed "
@@ -399,12 +517,25 @@ if __name__ == "__main__":
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=1e-2)
     p.add_argument("--dropout", type=float, default=0.1)
+    p.add_argument("--no-amp", action="store_true",
+                   help="disable mixed precision (1.7x slower)")
+    p.add_argument("--count-head", action="store_true",
+                   help="add the 0/1/2 local-onset-count head "
+                        "(dataset.build_count_target)")
+    p.add_argument("--count-radius", type=int, default=COUNT_RADIUS,
+                   help="count-target bin radius in frames")
+    p.add_argument("--count-weight", type=float, default=1.0,
+                   help="weight on the count head's CE loss")
     p.add_argument("--class-weight", type=float, default=1.0,
                    help="Weight on the class-head soft-CE term relative "
                         "to the onset BCE term")
     p.add_argument("--clip-len", type=int, default=CLIP_LEN)
     p.add_argument("--stride", type=int, default=24)
     p.add_argument("--sigma", type=float, default=SIGMA)
+    p.add_argument("--aug-strength", type=float, default=1.0,
+                   help="Scales every photometric augmentation toward "
+                        "identity (dataset.AUG_*); 1.0 = the widened "
+                        "ranges added 2026-07-31, 0 = geometry only")
     p.add_argument("--threshold", type=float, default=THRESHOLD)
     p.add_argument("--beta", type=float, default=BETA)
     p.add_argument("--min-sep", type=int, default=MIN_SEP)
@@ -421,7 +552,9 @@ if __name__ == "__main__":
                         "two to quote a result inside the seed envelope "
                         "(see encoding-rework-flat memory: ~2.3pt spread "
                         "observed elsewhere in this project)")
-    p.add_argument("--workers", type=int, default=0)
+    p.add_argument("--workers", type=int, default=3,
+                   help="dataloader workers; each costs ~1.8GB (Windows "
+                        "spawn copies the streams). 0 starves the GPU.")
     p.add_argument("--eval", action="store_true")
     p.add_argument("--model", type=str, default=MODEL_PATH)
     p.add_argument("--allow-train-sessions", action="store_true")

@@ -15,6 +15,36 @@ almost nothing about its actual accuracy.
 This replaces that gate with a learned per-frame onset score, supervised
 for free by the BLE move timestamps you already record.
 
+## Directory layout (reorganized 2026-08-03)
+
+This folder used to accumulate every checkpoint, sweep result, and log
+flat at its root — over 150 files, with no indication of when anything
+was produced. It's now:
+
+    checkpoints/          every *.pt — model checkpoints
+    results/<YYYY-MM-DD>/ sweep/audit/eval *.json output, dated by when
+                          the run that produced it happened
+    logs/<YYYY-MM-DD>/    the matching *.log files, same dating
+    cache/                reconstruct_tables.npz, crop_contact_sheet.png
+    <everything else>     *.py, *.md, *.txt, *.sh stay at this root
+
+Filenames were preserved during the move (only their directory changed),
+so every exact filename cited in GAMEPLAN.md / ALGORITHM_PRIOR.md /
+ACCURACY_TARGET.md / PATH_TO_VERIFICATION.md still identifies the same
+file — just look for it under `results/<some-date>/` or `logs/<some-date>/`
+rather than bare at this root. New sweeps should write their `--out` into
+`results/<today>/` / `logs/<today>/` by the same convention rather than
+back into the root.
+
+The old first-generation ResNet-18 classifier track (`ble/train_move_*`'s
+predecessor experiments: encoding sweeps, optical-flow probes, and their
+checkpoints/logs) was archived out of `ble/` root to `legacy/move_classifier_rnd/`
+the same day — see that folder if you're looking for something that
+"should" be in `ble/` but isn't; `train_move_classifier.py` and
+`encodings_move.py` stayed at `ble/` root since they're still live imports
+of the current pipeline (`prepare_data.py`, `algorithms.py`, `live_detect.py`,
+`window_audit.py` all import constants from them).
+
 ## Pipeline
 
 ```
@@ -28,7 +58,7 @@ record_training.py                     # webcam + BLE, keeps the raw frames
 ```bash
 python prepare_data.py --sessions ../training_data/solve_*/
 python train.py        --sessions ../training_data/solve_*/
-python train.py        --sessions ../training_data/solve_*/ --eval --model move_detector.pt
+python train.py        --sessions ../training_data/solve_*/ --eval --model checkpoints/move_detector.pt
 ```
 
 Run these from inside `move_detector/`, same convention as the rest of the
@@ -50,7 +80,7 @@ cd move_detector
 python prepare_data.py --sessions ../training_data/solve_<stamp>/
 
 # 2. score the deployed model on it — it has never seen this session
-python train.py --eval --model move_detector.pt \
+python train.py --eval --model checkpoints/move_detector.pt \
                 --sessions ../training_data/solve_<stamp>/
 ```
 
@@ -128,7 +158,7 @@ qualitative look instead — it reads threshold and `min_sep` from the
 checkpoint, so it matches however the model was tuned:
 
 ```bash
-python live_detect.py --detector move_detector_all28.pt
+python live_detect.py --detector checkpoints/move_detector_all28.pt
 ```
 
 To then *fix* a new environment rather than just measure it, add its
@@ -238,11 +268,11 @@ as a general result. `move_classifier_all39.pt` is now `CLASSIFIER_PATH`.
 The detector got the same treatment for the same reason: the sessions
 these five sittings recorded had never been through `prepare_data.py` at
 all (`--session` and `--ble` scoring don't need the cache;
-`move_detector/train.py` does), so the deployed `move_detector.pt` — a
+`move_detector/train.py` does), so the deployed `checkpoints/move_detector.pt` — a
 same-day "final fit" on 12 sessions with no held-out score of its own — had
 literally never been measured against 20260723/20260724 footage. Once
 prepared and scored, it read 89.8% F1 across all 16 sessions from those two
-days. Retrained as `move_detector_all28.pt` (28 frame-bearing sessions,
+days. Retrained as `checkpoints/move_detector_all28.pt` (28 frame-bearing sessions,
 `--holdout session` with one name per recording day including 20260724):
 93.9% F1 / 95.8% recall aggregate on that four-day holdout, and it beats
 the old detector head-to-head on the two sessions neither had trained on

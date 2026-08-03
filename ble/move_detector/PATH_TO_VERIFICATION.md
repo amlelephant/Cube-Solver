@@ -74,7 +74,7 @@ back up.
 
 - Honest generalization rate (classifier-unseen sessions, full pipeline,
   camera-only): **1/6 verified, 0/6 exact**, re-measured fresh 2026-07-27
-  (`baseline_rev2_pre.log`) and reproduced identically across four
+  (`logs/2026-07-27/baseline_rev2_pre.log`) and reproduced identically across four
   independent conditions since (see the sprint-result block above). The
   all-sessions number (19/40) is inflated by sessions the classifier
   trained on — don't quote it.
@@ -174,7 +174,7 @@ Three consequences to internalize before touching code:
 
 ## 3. Current measured baseline (re-verify before use — see rule above)
 
-As measured 2026-07-26/27, deployed detector `move_detector_all28.pt` +
+As measured 2026-07-26/27, deployed detector `checkpoints/move_detector_all28.pt` +
 classifier `move_classifier_all39_jitter.pt`:
 
 | metric | value | source |
@@ -207,7 +207,7 @@ of machinery that already exists (rev 1 of this doc and an earlier review
 both mistakenly proposed some of these as "new" ideas):
 
 - **Pattern-database lower bounds** (BFS tables over twist/flip/udslice
-  coordinates, `h_light`/`h_full`, cached in `reconstruct_tables.npz`) —
+  coordinates, `h_light`/`h_full`, cached in `cache/reconstruct_tables.npz`) —
   already used as an admissible capacity penalty in `_Beam._rank`, plus a
   corner-parity bound. Note the capacity term only fires near the tail
   (`remaining + max_end_ins < 14`) because PDB distances cap at ~12 —
@@ -418,7 +418,7 @@ just the sketch):**
   docstring's `solve_20260721_103149` example (cost 10.17, needs beam
   64000) was measured 2026-07-22 against whatever detector/classifier was
   deployed then. Re-measured fresh 2026-07-27 with the CURRENT models
-  (`move_detector_all28.pt` + `move_classifier_all39_jitter.pt`): that
+  (`checkpoints/move_detector_all28.pt` + `move_classifier_all39_jitter.pt`): that
   session's true-path cost is now **34.5**, and it does not solve
   single-pass even at **beam 128000**. The models changed (crop-regime
   fix, jitter retrain) between the citation and now, and this specific

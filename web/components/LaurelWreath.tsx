@@ -24,10 +24,7 @@ const TIER_TONES: Record<
     deep: "#3f5a28",
     bright: "#c8d96e",
     stem: "#5d5326",
-    // Ripe olives really do go dark plum-brown, and that is the only thing in
-    // this palette that isn't a green — which is exactly why the fruit reads.
-    // A green-on-green olive (tried first) vanishes into the foliage.
-    fruit: ["#3b2b33", "#a8bb4e"], // ripe, and still-green
+    fruit: ["#430353", "#7f9435"], // ripe, and still-green
   },
 };
 
@@ -253,10 +250,10 @@ function frondOlives(fr: Frond, size: number): Olive[] {
     return {
       x: p.x - u.y * side * reach,
       y: p.y + u.x * side * reach,
-      r: radius * (0.075 + rnd(i, fr.salt + 9) * 0.03),
+      r: radius * (0.055 + rnd(i, fr.salt + 9) * 0.028),
       stalk: p,
-      // a roughly even mix — uneven ripening is the tell that these are fruit
-      ripe: rnd(i, fr.salt + 10) > 0.5,
+      // mostly ripe, one or two still green — uneven ripening is the tell
+      ripe: rnd(i, fr.salt + 10) > 0.38,
     };
   });
 }
@@ -330,15 +327,11 @@ export function LaurelWreath({
                   strokeWidth={Math.max(0.6, size * 0.008)}
                   strokeLinecap="round"
                 />
-                {/* thin rim in the stem tone: without it a green olive melts
-                    into the leaf it overlaps, on either page theme */}
                 <circle
                   cx={f(o.x)}
                   cy={f(o.y)}
                   r={f(o.r)}
                   fill={o.ripe ? tone.fruit![0] : tone.fruit![1]}
-                  stroke={tone.stem}
-                  strokeWidth={Math.max(0.5, size * 0.006)}
                 />
               </g>
             ))}

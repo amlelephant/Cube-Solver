@@ -25,23 +25,39 @@ ble/training_data/
 # generated on first solve() call (~1 min), cached to speed up subsequent runs.
 tables.json
 
-# QTM pattern-database cache built by ble/move_detector/reconstruct.py
-ble/move_detector/reconstruct_tables.npz
+# Reorganized 2026-08-03 (checkpoints/, results/<date>/, logs/<date>/, cache/ —
+# see ble/move_detector/README.md) out of a flat pile of loose files at
+# ble/ and ble/move_detector/ root. QTM pattern-database cache and the crop
+# contact sheet now live under cache/.
+ble/move_detector/cache/
 
 # Ad-hoc experiment run logs and measurement result dumps — regenerate by
 # re-running the scripts that produced them (see ble/move_detector/*.py
 # module docstrings for the invocations); not source.
 ble/*.log
 ble/*.json
-ble/move_detector/*.log
-ble/move_detector/*.json
+ble/move_detector/results/
+ble/move_detector/logs/
 ble/move_detector/scorecards/
-ble/move_detector/crop_contact_sheet.png
 
-# Rendered figures from viz_encodings.py / raft_flow_viz.py — regenerate
-# from a session, not source.
+# The archived first-generation classifier track (legacy/move_classifier_rnd/,
+# see ble/README-equivalent notes in CLAUDE.md) carries the same kind of
+# regenerable log/result dumps as ble/ did before its 2026-08-03 reorg.
+legacy/move_classifier_rnd/*.log
+legacy/move_classifier_rnd/*.json
+
+# ingest_video.py output — external footage kept separate from
+# ble/training_data/ so it never silently joins the smart-cube corpus.
+ble/captures/
+
+# Rendered figures from viz_encodings.py / raft_flow_viz.py (archived to
+# legacy/move_classifier_rnd/ 2026-08-03) — regenerate from a session, not
+# source. Both locations covered since the scripts' own "cd ble" usage
+# examples predate the archive and still work if invoked that way.
 ble/viz_out/
 ble/viz_flow/
+legacy/move_classifier_rnd/viz_out/
+legacy/move_classifier_rnd/viz_flow/
 
 # OS
 Thumbs.db

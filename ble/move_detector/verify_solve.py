@@ -8,7 +8,7 @@ The whole pipeline, end to end, stated as the product claim:
 
 Everything upstream measures a component. This measures the claim:
 
-    detector      when a move happened          (move_detector.pt)
+    detector      when a move happened          (checkpoints/move_detector.pt)
     classifier    which move it was             (move_classifier_*.pt)
     reconstruct   which sequence is CONSISTENT with the cube going from
                   the known start state to the known end state
@@ -104,6 +104,37 @@ re-measure after retraining either model.
     python verify_solve.py --skip-scramble      # cube already scrambled...
     python verify_solve.py --claim "R U R' U'"  # ...by this word
 
+Which model reads the video (--joint, --ctc)
+--------------------------------------------
+Three arms are wired here, all producing the same moves list and all
+decoded by the same reconstruct.py, so the only thing that differs between
+them is how a video becomes a move sequence:
+
+    (default)   the deployed detector + classifier pair — two models, a
+                window cut around each detected onset
+    --joint     Stage A's single joint onset+class model, peak-picked off
+                its own posteriorgram (train_joint.py, joint_decode.py)
+    --ctc       the same trunk trained with a CTC objective and decoded by
+                a prefix beam search over FRAMES (train_ctc.py,
+                ctc_decode.py). No onset threshold and no min_sep: whether
+                a move exists at all is settled inside the search instead
+                of by peak-picking beforehand, which is where every
+                phantom and every merged-onset miss used to be created.
+
+--ctc is the best-measured of the three offline — held out, replicated on
+both seeds: move error rate 8.5% -> 5.8%, phantoms down 64%, verified
+sessions 1/8 -> 3/8 — but it has never been run on a live take, which is
+the regime that has broken every previous offline result in this project.
+That is what this script is for. The default is unchanged so the two can
+be compared on the same sitting.
+
+    python verify_solve.py --ble --front blue --top yellow --ctc --save
+
+--lm additionally fuses move_lm.py's n-gram prior into the CTC beam. It is
+regime-dependent and measured as such: a gain cross-day, a loss on the
+same-day holdout, on both seeds. A live take is cross-day, so it should
+help — a prediction, not a measurement, and the reason it is a flag.
+
 Run from inside move_detector/, same convention as the rest of the repo.
 """
 
@@ -169,9 +200,16 @@ def decode_claim(start_state, end_state, cost_rows, del_costs, args, tables,
     (start_state, end_state) natively, so unlike decode_between it needs
     no frame-shift; same beam/retry contract either way.
     """
+    # slices/c_slice/slice_rows travel with every claim, true and decoy
+    # alike. A cost model that is more generous to the true claim than to
+    # its decoys inflates every verdict without making any of them more
+    # true, which would silently gut the whole point of the sweep.
     kw = dict(c_del=args.del_cost, c_ins=args.ins_cost, c_rot=args.rot_cost,
               max_end_ins=args.max_end_ins, rel_weight=args.rel_weight,
-              del_costs=del_costs, rotations=args.rotations, tables=tables)
+              del_costs=del_costs, rotations=args.rotations, tables=tables,
+              slices=bool(getattr(args, "slices", False)),
+              c_slice=float(getattr(args, "c_slice", RC.C_SLICE)),
+              slice_rows=getattr(args, "slice_rows", None))
     beam = beam or args.beam
     res = _decode_one(start_state, end_state, cost_rows, beam, args, tables, kw)
     if retry and not res["solved"] and args.retry_beam > beam:
@@ -192,6 +230,12 @@ def verify_claim(label, start_state, end_state, moves, threshold, args,
     pred_names, cost_rows, del_costs = RC.costs_from_moves(
         moves, threshold, args.blend_inv, args.blend_unif, args.del_cost,
         args.candidate_threshold, args.del_floor, args.blend_adj)
+
+    # Which onsets may be read as a middle-slice turn. Computed once here and
+    # stashed on args so decode_claim uses the SAME mask for the true claim
+    # and for every falsifiability decoy — see decode_claim's kw comment.
+    args.slice_rows = (RC.slice_rows_from_moves(moves, args.slice_gate)
+                       if getattr(args, "slices", False) else None)
 
     print(f"\n{'='*70}")
     print(f"  {label}")
@@ -487,14 +531,13 @@ def load_joint_stack(args):
     branching beyond which loader they call.
     """
     import torch
-    from model import build_joint_model
+    from model import build_joint_from_ckpt
     from crop_utils import load_detector
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(args.joint_model, map_location=device)
-    model = build_joint_model(device, in_channels=ckpt.get("in_channels", 4),
-                              n_classes=ckpt.get("n_classes", 13))
-    model.load_state_dict(ckpt["state_dict"])
+    _check_model_type(ckpt, args.joint_model, want="joint")
+    model = build_joint_from_ckpt(ckpt, device)
     model.eval()
     threshold = args.threshold if args.threshold is not None \
         else ckpt.get("threshold", 0.5)
@@ -507,6 +550,9 @@ def load_joint_stack(args):
     print(f"  Val (at save): F1 {ckpt.get('val_f1',0)*100:.1f}%, at_onset "
           f"{ckpt.get('val_at_onset',0)*100:.1f}%, held out "
           f"{ckpt.get('val_session_names', [])}")
+    if ckpt.get("n_counts"):
+        print(f"  Count head:  present — merged peaks may be split in two "
+              f"(joint_decode.split_peak)")
     print(f"  Device:      "
           f"{torch.cuda.get_device_name(0) if device.type=='cuda' else 'CPU'}")
 
@@ -515,6 +561,86 @@ def load_joint_stack(args):
         print(f"  WARNING: cube detector unavailable — falling back to "
               f"centered square crops.")
     return detector, model, device, threshold, min_sep
+
+
+def _check_model_type(ckpt, path, want):
+    """
+    Refuse a checkpoint decoded by the wrong decoder.
+
+    The two Stage A arms share a trunk and a state_dict shape, so a CTC
+    checkpoint loads perfectly under --joint and a peak-picked checkpoint
+    loads perfectly under --ctc. Neither fails loudly — they just produce
+    nonsense, because the 13th column means "background" in one arm and
+    CTC's blank in the other, and a blank column is ~0.9 on almost every
+    frame. That would read as a catastrophic model regression rather than
+    as the flag mistake it is, live, with a cube in your hand.
+    """
+    got = ckpt.get("model_type", "joint")
+    if got != want:
+        sys.exit(f"{path} is a '{got}' checkpoint but --{want} decodes it as "
+                 f"'{want}'.\nThe two share a state_dict shape so this would "
+                 f"load and silently produce garbage.\nUse --{got} "
+                 f"--{got}-model {path} instead.")
+
+
+def load_ctc_stack(args):
+    """
+    --ctc: load the CTC-trained trunk (train_ctc.py) plus, with --lm, the
+    n-gram move prior fused into the prefix beam search. Same 5-tuple as
+    load_stack/load_joint_stack; `threshold` still feeds
+    costs_from_moves' deletion pricing downstream, `min_sep` is inert on
+    this path (see joint_decode.analyse_ctc_live).
+
+    The LM is fit on the CHECKPOINT'S OWN training sessions, read off the
+    checkpoint rather than passed in. Fitting it on anything wider would
+    leak held-out move sequences into their own decode; on a live take
+    there is no holdout to leak, but the prior has to be the same object
+    that was measured offline or the live number is not comparable to it.
+    """
+    import torch
+    from model import build_joint_from_ckpt
+    from crop_utils import load_detector
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ckpt = torch.load(args.ctc_model, map_location=device)
+    _check_model_type(ckpt, args.ctc_model, want="ctc")
+    model = build_joint_from_ckpt(ckpt, device)
+    model.eval()
+    threshold = args.threshold if args.threshold is not None \
+        else ckpt.get("threshold", 0.5)
+
+    print(f"\n  CTC model:  {args.ctc_model}  (epoch {ckpt.get('epoch','?')}, "
+          f"seed {ckpt.get('seed','?')})")
+    print(f"  Val (at save): MER {ckpt.get('val_mer', float('nan'))*100:.1f}% "
+          f"greedy"
+          + (f", {ckpt['val_mer_beam']*100:.1f}% at beam {ckpt.get('beam')}"
+             if ckpt.get("val_mer_beam") is not None else "")
+          + f"; held out {ckpt.get('val_session_names', [])}")
+    print(f"  Decoder:    prefix beam {args.ctc_beam} over frames — no onset "
+          f"threshold, no min_sep")
+
+    args.lm = None
+    if args.lm_fusion:
+        from move_lm import MoveLM
+        train_names = list(ckpt.get("train_session_names") or [])
+        if not train_names:
+            sys.exit("--lm needs the checkpoint's train_session_names to fit "
+                     "the prior on;\nthis checkpoint has none.")
+        args.lm = MoveLM.from_sessions(train_names, order=args.lm_order)
+        print(f"  LM:         order {args.lm_order}, {args.lm.n_sequences} "
+              f"sessions / {args.lm.n_moves} moves, alpha {args.lm_alpha}, "
+              f"beta {args.lm_beta}")
+        print(f"              regime-dependent: measured as a GAIN cross-day "
+              f"and a LOSS on the\n              same-day holdout, on both "
+              f"seeds. A live take today is cross-day.")
+    print(f"  Device:     "
+          f"{torch.cuda.get_device_name(0) if device.type=='cuda' else 'CPU'}")
+
+    detector = load_detector()
+    if detector is None:
+        print(f"  WARNING: cube detector unavailable — falling back to "
+              f"centered square crops.")
+    return detector, model, device, threshold, None
 
 
 # ---------------------------------------------------------------------------
@@ -618,9 +744,20 @@ def save_take(out_dir: Path, buf, stamps, truth, meta: dict) -> Path | None:
     # asked live, and by the time a take looks wrong the cube has moved on.
     if truth is not None:
         solved, wrong = truth.solved_report()
+        # Named as the claim it is, not as ground truth — see the same
+        # change in record_training.py for why. Nothing downstream reads
+        # these; every decode targets the solved state and derives its
+        # start state from the move word.
         with open(out_dir / "ble_meta.json", "w") as fh:
-            json.dump({"end_state": truth.snapshot_state(),
-                       "end_solved": solved, "end_facelets_wrong": wrong,
+            json.dump({"cube_reported_end_state": truth.snapshot_state(),
+                       "cube_reported_end_solved": solved,
+                       "end_facelets_wrong": wrong,
+                       "end_state_trusted": not (wrong and wrong > 24),
+                       "end_state_note": (
+                           "The cube's own state tracking, not an "
+                           "observation; >24 facelets wrong means the cube "
+                           "has drifted, since one quarter turn moves 6. "
+                           "Check the move word with session_check.py."),
                        "battery": truth.battery, "move_count": n_moves,
                        "health": truth.health()}, fh, indent=2)
 
@@ -694,7 +831,8 @@ def record_phase(args, title, instructions, overlay=None, truth=None,
 
 
 def run_live(args, tables):
-    stack = load_joint_stack(args) if args.joint else load_stack(args)
+    stack = (load_ctc_stack(args) if args.ctc else
+             load_joint_stack(args) if args.joint else load_stack(args))
     detector, det_model, device, threshold, min_sep = stack
     truth = connect_truth(args)
     try:
@@ -707,6 +845,19 @@ def run_live(args, tables):
 def _run_live(args, tables, stack, truth):
     detector, det_model, device, threshold, min_sep = stack
     stamp = time.strftime("%Y%m%d_%H%M%S")
+
+    # Before anything is recorded, while adding a lamp still costs nothing.
+    # This is a clock heuristic, not a measurement of the room: the
+    # statistical out-of-distribution gates were built and measured and had
+    # no power to separate a 56% take from a 90% one (see lighting_check.py).
+    if not args.no_lighting_check:
+        import lighting_check as LC
+        note = LC.time_of_day_note()
+        if note:
+            print(f"\n{'='*70}\n{note}\n{'='*70}")
+            if input("\n  Continue anyway? [Y/n] ").strip().lower() \
+                    in ("n", "no"):
+                sys.exit("Aborted — come back with more light.")
     if args.save:
         print(f"\n  Saving both takes under {args.save}/solve_{stamp}_*")
 
@@ -729,7 +880,14 @@ def _run_live(args, tables, stack, truth):
     def analyse(src, label):
         load_color, n, fps, _window, ftimes = src
         print(f"\n  analysing {n} frames...")
-        if args.joint:
+        if args.ctc:
+            import joint_decode as JD
+            res = JD.analyse_ctc_live(load_color, n, fps, detector,
+                                      det_model, device,
+                                      beam=args.ctc_beam, lm=args.lm,
+                                      alpha=args.lm_alpha if args.lm else 0.0,
+                                      beta=args.lm_beta if args.lm else 0.0)
+        elif args.joint:
             import joint_decode as JD
             res = JD.analyse_joint_live(load_color, n, fps, detector,
                                         det_model, device, threshold,
@@ -771,8 +929,19 @@ def _run_live(args, tables, stack, truth):
                     print(f"  Phase 1 measures a scramble applied to a solved "
                           f"cube, so this take would\n  be scored against the "
                           f"wrong start state.")
-                if input("  Solve it first, then press ENTER — or type 'go' "
-                         "to proceed anyway: ").strip().lower() != "go":
+                if wrong > 24:
+                    # Do not block on a reading we have just finished
+                    # explaining is untrustworthy. One quarter turn moves 6
+                    # facelets, so >24 is not a partly-finished solve; it is
+                    # the cube's state tracking drifting, and aborting a
+                    # good take on the strength of it is the wrong call.
+                    # Warn, record, continue.
+                    print(f"  Proceeding anyway — a reading this far off is "
+                          f"the cube being wrong, not you.\n  The take is "
+                          f"still valid; session_check.py will verify the "
+                          f"move word afterwards.")
+                elif input("  Solve it first, then press ENTER — or type "
+                           "'go' to proceed anyway: ").strip().lower() != "go":
                     if truth.is_solved() is False:
                         sys.exit("Still not solved. Aborted.")
             elif solved_now is None:
@@ -1068,12 +1237,18 @@ def print_verdict(phase1, phase2, sweep, args):
         raw = phase1
         subs = raw.get("raw_errors", 0)
         if (raw.get("acc") or 0.0) < 0.98:
-            print(f"\n  Remaining error is dominated by the CLASSIFIER "
+            # One model on --ctc/--joint, so "the classifier" is not a
+            # component that exists to blame; the actionable half of the
+            # sentence (training data from this room, not a wider beam) is
+            # the same either way.
+            where = ("the MODEL" if (args.ctc or args.joint)
+                     else "the CLASSIFIER")
+            print(f"\n  Remaining error is dominated by {where} "
                   f"({subs} raw errors on\n  a {raw['n_onsets']}-onset "
                   f"scramble). The decode repairs a handful; past ~6 mixed\n"
                   f"  errors it is out of envelope by construction, so the "
-                  f"fix is classifier\n  training data from THIS "
-                  f"environment, not a wider --beam.")
+                  f"fix is training data\n  from THIS environment, not a "
+                  f"wider --beam.")
 
 
 # ---------------------------------------------------------------------------
@@ -1093,8 +1268,36 @@ def main():
                         "detector+classifier pair. Prototype, offline-"
                         "measured only so far — see MODEL_REWORK_PLAN.md "
                         "for what that does and does not cover.")
-    p.add_argument("--joint-model", type=str, default="move_joint_seed0.pt",
+    p.add_argument("--joint-model", type=str, default="checkpoints/move_joint_seed0.pt",
                    help="Checkpoint to use with --joint")
+    p.add_argument("--ctc", action="store_true",
+                   help="Use the CTC arm (train_ctc.py): same trunk as "
+                        "--joint, but move existence is decided inside a "
+                        "prefix beam search over frames instead of by "
+                        "peak-picking a threshold. Measured on the held-out "
+                        "set, both seeds: MER 8.5%% -> 5.8%%, phantoms -64%%, "
+                        "verified 1/8 -> 3/8.")
+    p.add_argument("--ctc-model", type=str, default="checkpoints/move_ctc_s0.pt",
+                   help="Checkpoint to use with --ctc")
+    p.add_argument("--ctc-beam", type=int, default=16,
+                   help="Width of the CTC prefix beam search over frames. "
+                        "Unrelated to --beam, which is the reconstruct.py "
+                        "cube-state search.")
+    p.add_argument("--lm", action="store_true", dest="lm_fusion",
+                   help="--ctc only: fuse move_lm.py's n-gram move prior "
+                        "into the prefix beam search. REGIME-DEPENDENT — "
+                        "measured as a gain cross-day and a loss on the "
+                        "same-day holdout, on both seeds. A live take is "
+                        "cross-day, so it should help; that is a prediction, "
+                        "not a measurement.")
+    p.add_argument("--lm-order", type=int, default=4)
+    p.add_argument("--lm-alpha", type=float, default=0.9,
+                   help="LM weight (tune_lm_fusion.py chose this on the "
+                        "unseen 07-29/30 dev sessions)")
+    p.add_argument("--lm-beta", type=float, default=4.0,
+                   help="Per-symbol insertion bonus; without it fusion "
+                        "trades phantoms for misses instead of reducing "
+                        "error")
     p.add_argument("--camera", type=int, default=0)
     p.add_argument("--scramble", type=int, default=20,
                    help="Length of the prescribed scramble (default 20)")
@@ -1134,9 +1337,28 @@ def main():
     p.add_argument("--no-sweep", action="store_true",
                    help="Skip the falsifiability decoys (they cost one "
                         "decode each)")
+    p.add_argument("--no-lighting-check", action="store_true",
+                   help="Skip the pre-take lighting reminder "
+                        "(lighting_check.py)")
     # Decoder knobs — same defaults and meanings as reconstruct.py.
     p.add_argument("--beam", type=int, default=RC.BEAM)
     p.add_argument("--retry-beam", type=int, default=4 * RC.BEAM)
+    p.add_argument("--slices", action="store_true",
+                   help="Let one onset decode as a middle-slice turn (the "
+                        "smart cube reports a slice as two same-timestamp "
+                        "face events, but the camera sees one motion). Off "
+                        "by default = exact prior behaviour. Measured "
+                        "+2/42 verified sessions with no falsifiability "
+                        "cost — see GROUND_TRUTH_ARTIFACTS.md.")
+    p.add_argument("--c-slice", type=float, default=RC.C_SLICE,
+                   dest="c_slice",
+                   help="Cost of a slice reading, on top of the onset's own "
+                        "acceptance cost (default %(default)s)")
+    p.add_argument("--slice-gate", type=float, default=RC.SLICE_GATE,
+                   dest="slice_gate",
+                   help="Minimum posterior mass on both halves of a pair "
+                        "before an onset may be read as a slice "
+                        "(default %(default)s)")
     p.add_argument("--del-cost", type=float, default=RC.C_DEL)
     p.add_argument("--ins-cost", type=float, default=RC.C_INS)
     p.add_argument("--rot-cost", type=float, default=RC.C_ROT)
@@ -1170,11 +1392,22 @@ def main():
                         "keep the cheapest solved result")
     args = p.parse_args()
 
-    if args.joint and args.session:
-        sys.exit("--joint --session isn't wired — run_session() still "
-                 "replays through the deployed detector+classifier. Use "
-                 "verify_joint.py for offline/recorded-session evaluation "
-                 "of the joint model; --joint here is for live capture only.")
+    if args.joint and args.ctc:
+        sys.exit("--joint and --ctc are two different decoders for two "
+                 "different checkpoints;\npick one. compare_onset_arms.py is "
+                 "the tool for scoring them against each other.")
+    if (args.joint or args.ctc) and args.session:
+        arm = "--ctc" if args.ctc else "--joint"
+        sys.exit(f"{arm} --session isn't wired — run_session() still "
+                 f"replays through the deployed detector+classifier. Use "
+                 f"verify_joint.py (peak-picked) or compare_onset_arms.py "
+                 f"(both arms, incl. CTC)\nfor offline/recorded-session "
+                 f"evaluation; {arm} here is for live capture only.")
+    if args.lm_fusion and not args.ctc:
+        sys.exit("--lm fuses a prior into the CTC prefix beam search, so it "
+                 "only means anything\nwith --ctc. The peak-picking arms have "
+                 "no beam over frames to fuse into.")
+    args.lm = None                      # set by load_ctc_stack when --lm
 
     tables = RC.build_tables()          # before any prompting, not mid-take
     if args.session:

@@ -26,6 +26,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+# Archived 2026-08-03 from ble/ into legacy/move_classifier_rnd/ — see
+# viz_encodings.py's identical bootstrap comment for why this is needed.
+# flow_direction and viz_encodings are still same-folder siblings here, so
+# only the ble/-root modules need the extra path.
+_BLE_DIR = Path(__file__).resolve().parents[2] / "ble"
+if str(_BLE_DIR) not in sys.path:
+    sys.path.insert(0, str(_BLE_DIR))
+
 import encodings_move as enc_mod
 from encodings_move import fit_global_flow, flow_to_wheel
 from flow_direction import _load_raft

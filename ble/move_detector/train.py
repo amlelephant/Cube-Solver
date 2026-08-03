@@ -31,7 +31,7 @@ Usage:
     python train.py --sessions ../training_data/solve_*/
     python train.py --sessions ../training_data/solve_*/ --epochs 60 --batch 8
     python train.py --sessions ../training_data/solve_*/ --eval \\
-        --model move_detector.pt
+        --model checkpoints/move_detector.pt
 """
 
 import argparse
@@ -62,12 +62,12 @@ except ImportError:
 
 from dataset import (SessionStream, OnsetClipDataset, load_streams,
                      split_streams, split_clips_pooled, overlap_frac,
-                     check_crop_regime, CLIP_LEN, SIGMA)
+                     check_crop_regime, check_label_regime, CLIP_LEN, SIGMA)
 from model import build_model, score_stream
 from decode import (peak_pick, match_onsets, sweep_threshold, format_metrics,
                     MIN_SEP, THRESHOLD, TOLERANCE, BETA)
 
-MODEL_PATH = "move_detector.pt"
+MODEL_PATH = "checkpoints/move_detector.pt"
 
 
 def resolve_sessions(patterns: list[str]) -> list[Path]:
@@ -164,6 +164,7 @@ def train(args):
         sys.exit("No prepared sessions. Run prepare_data.py first.")
 
     # Before anything else: are all these streams the same input scale?
+    label_regime = check_label_regime(streams)
     crop_regime = check_crop_regime(streams,
                                     allow_mixed=args.allow_uncropped)
 
@@ -301,6 +302,7 @@ def train(args):
                 "val_session_names": [],
                 "train_session_names": [s.name for s in streams],
                 "crop_regime": crop_regime,
+                "label_regime": label_regime,
                 "sigma": args.sigma,
                 "clip_len": args.clip_len,
                 "threshold": args.threshold,
@@ -323,6 +325,7 @@ def train(args):
                 # report training-set fit as held-out performance.
                 "train_session_names": [s.name for s in train_s],
                 "crop_regime": crop_regime,
+                "label_regime": label_regime,
                 "sigma": args.sigma,
                 "pos_weight": args.pos_weight,
                 "clip_len": args.clip_len,

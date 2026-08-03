@@ -63,7 +63,8 @@ if str(_BLE_DIR) not in sys.path:
     sys.path.insert(0, str(_BLE_DIR))
 
 from model import build_model                                     # noqa: E402
-from decode import align_sequences, MIN_SEP, TOLERANCE            # noqa: E402
+from decode import (align_sequences, onset_collisions,           # noqa: E402
+                    MIN_SEP, TOLERANCE)
 from live_detect import analyse, DETECTOR_PATH, CLASSIFIER_PATH   # noqa: E402
 
 
@@ -115,7 +116,21 @@ def score_by_time(moves: list[dict], gt_onset: np.ndarray,
                           moves[pi]["frame"] - int(gt_onset[j])))
     miss = len(gt_onset) - len(pairs)
     phantom = len(moves) - len(pairs)
+
+    # Split the misses the model could have avoided from the ones no peak
+    # picker can report at all. Without this the headline miss count is
+    # inflated by the ground truth's own time resolution — on four of the
+    # 2026-07-24/25 sessions EVERY miss was of the unresolvable kind, which
+    # made a frame-rate limit read as a detector regression.
+    unresolvable, crowded = onset_collisions(gt_onset)
+    missed = [j for j in range(len(gt_onset)) if j not in pairs]
+    miss_forced = sum(1 for j in missed if j in unresolvable)
+    miss_crowded = sum(1 for j in missed if j in crowded)
+
     return {"ok": ok, "sub": sub, "miss": miss, "phantom": phantom,
+            "miss_forced": miss_forced, "miss_crowded": miss_crowded,
+            "miss_clean": miss - miss_forced - miss_crowded,
+            "n_unresolvable": len(unresolvable), "n_crowded": len(crowded),
             "pairs": pairs, "wrong": wrong, "seq_err": seq_err}
 
 
@@ -243,6 +258,22 @@ def audit_session(session_dir: Path, detector, det_model, device,
     print(f"    {'':5} {'':44}   {'detector':>13}  {'of found':>8}")
     line("TIME", t)
     line("SEQ", s)
+
+    # A miss the peak picker was never allowed to avoid is not a model
+    # result. Quote the adjusted recall next to the raw one, never instead
+    # of it — the moves really were not reported, they just were not
+    # reportable. See decode.onset_collisions.
+    if t["miss_forced"] or t["n_unresolvable"]:
+        det_adj = t["ok"] + t["sub"]
+        denom = len(gt) - t["miss_forced"]
+        print(f"    of the {t['miss']} TIME misses: {t['miss_forced']} "
+              f"unresolvable (GT onsets < {MIN_SEP} frames apart — no peak "
+              f"picker\n          can report both), {t['miss_crowded']} "
+              f"crowded (exactly {MIN_SEP} apart), "
+              f"{t['miss_clean']} clean")
+        print(f"    recall excluding unresolvable: "
+              f"{det_adj / denom * 100:.1f}%  (raw "
+              f"{det_adj / len(gt) * 100:.1f}%)")
 
     print(f"    crop: cube fills {box_frac*100:.0f}% of frame height, "
           f"box drift {box_jit*100:.1f}% of its side per frame")

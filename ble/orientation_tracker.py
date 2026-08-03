@@ -75,6 +75,10 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
+# Dependency-free by design, so importing it can never fail on the capture
+# machine — see its module docstring.
+from slice_frame import CameraFrame, is_slice_pair
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -294,6 +298,13 @@ class MoveResult:
     top_color:    str        # which color is on the U face at time of this move
     is_rotation:  bool = False
     rotation_name: str = ""
+    # The move as the CAMERA saw it. Equal to wca_notation until a
+    # middle-slice turn rotates the cube's centres away from the camera —
+    # after that the cube keeps reporting in its own rotated frame and only
+    # this field names the face that physically moved. See ble/slice_frame.py.
+    camera_notation: str = ""
+    # The camera<-cube orientation in force for this move, for the record.
+    orientation: str = "identity"
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +327,11 @@ class OrientationTracker:
         self._face_map: Optional[FaceMap] = None
         self._move_history: list[MoveResult] = []
         self._calibrated = False
+        # Camera<-cube frame. The cube reports relative to its centres, and a
+        # middle-slice turn moves them; without this every label after the
+        # first slice names the wrong face. See ble/slice_frame.py.
+        self._frame = CameraFrame()
+        self._prev: tuple[str, float] | None = None
 
     # ── Calibration ──────────────────────────────────────────────────────────
 
@@ -345,6 +361,9 @@ class OrientationTracker:
 
         self._face_map = FaceMap.from_front_and_top(front_color, top_color)
         self._calibrated = True
+        # Calibration IS the statement that the two frames agree right now.
+        self._frame.reset()
+        self._prev = None
         print(f"[orientation] Calibrated: F={front_color}, U={top_color}")
         print(f"[orientation] Full map: {self._face_map}")
 
@@ -404,10 +423,26 @@ class OrientationTracker:
 
     # ── Move processing ───────────────────────────────────────────────────────
 
-    def apply_ble_move(self, raw_byte: int) -> Optional[MoveResult]:
+    def apply_ble_move(self, raw_byte: int,
+                       timestamp: Optional[float] = None) -> Optional[MoveResult]:
         """
         Process a single raw BLE FaceRotation byte.
         Returns a MoveResult, or None if the byte is unrecognised.
+
+        `timestamp` (seconds) enables slice detection. The cube reports a
+        middle-slice turn as a PAIR of opposite-face quarter turns with
+        opposite handedness, arriving within one notification tick, because
+        the core rotates with the slice — and that rotation carries the
+        centres, which is what the cube's whole coordinate system is built
+        on. Without a timestamp the pair cannot be told from two genuinely
+        separate turns, so `camera_notation` degrades to `wca_notation` and
+        the caller gets the pre-2026-08-03 behaviour rather than a guess.
+
+        Both halves of a pair are labelled under the frame in force BEFORE
+        the rotation, and the rotation takes effect for the move after them
+        — the centres finish moving when the slice finishes. That is the
+        same rule slice_frame.annotate applies offline, deliberately, so a
+        session labelled live and one backfilled later cannot disagree.
         """
         if not self._calibrated:
             raise RuntimeError(
@@ -429,16 +464,39 @@ class OrientationTracker:
             wca_notation = wca_notation,
             front_color  = self._face_map.color_on(F),
             top_color    = self._face_map.color_on(U),
+            camera_notation = self._frame.camera_name(wca_notation),
+            orientation  = self._frame.describe(),
         )
+
+        if timestamp is not None:
+            if self._prev is not None and is_slice_pair(
+                    self._prev[0], self._prev[1], wca_notation, timestamp):
+                self._frame.apply_slice(self._prev[0], wca_notation)
+                self._prev = None          # a pair consumes both halves
+            else:
+                self._prev = (wca_notation, timestamp)
+
         self._move_history.append(result)
         return result
 
     def apply_move_event(self, move_event) -> Optional[MoveResult]:
         """
         Process a MoveEvent from cube_ble.py.
-        Convenience wrapper around apply_ble_move.
+        Convenience wrapper around apply_ble_move that forwards the event's
+        own timestamp, which is what makes slice detection work.
         """
-        return self.apply_ble_move(move_event.raw_byte)
+        return self.apply_ble_move(move_event.raw_byte,
+                                   getattr(move_event, "timestamp", None))
+
+    @property
+    def camera_frame(self) -> str:
+        """The current camera<-cube orientation, 'identity' when they agree."""
+        return self._frame.describe()
+
+    @property
+    def frame_drifted(self) -> bool:
+        """True once a slice has rotated the cube's frame off the camera's."""
+        return not self._frame.is_identity
 
     # ── Manual orientation update ─────────────────────────────────────────────
 

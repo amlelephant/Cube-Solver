@@ -1553,10 +1553,14 @@ def main() -> None:
                         "— the test that actually separates true "
                         "identifications from false ones")
     p.add_argument("--replay-classifier", type=str,
-                   default="move_classifier_all39_cropped.pt",
+                   default="../../legacy/move_classifier_rnd/"
+                           "move_classifier_all39_cropped.pt",
                    help="Step 1b: score only replays cached from this "
                         "checkpoint — mixing checkpoints averages two "
-                        "different error profiles")
+                        "different error profiles. Archived 2026-08-03; "
+                        "this whole module is a measured-and-rejected "
+                        "recogniser approach, kept for the record "
+                        "(ALGORITHM_PRIOR.md §6-8)")
     p.add_argument("--min-len", type=int, default=4,
                    help="Shortest library entry to use. Short entries drive "
                         "the false-match rate — raise this if the null is "

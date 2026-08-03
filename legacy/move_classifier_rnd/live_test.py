@@ -21,8 +21,16 @@ import argparse
 import collections
 import time
 import sys
+from pathlib import Path
 import cv2
 import numpy as np
+
+# Archived 2026-08-03 from ble/ into legacy/move_classifier_rnd/ — see
+# viz_encodings.py's identical bootstrap comment for why this is needed
+# (train_move_classifier.py, imported below at runtime, stays at ble/ root).
+_BLE_DIR = Path(__file__).resolve().parents[2] / "ble"
+if str(_BLE_DIR) not in sys.path:
+    sys.path.insert(0, str(_BLE_DIR))
 
 # ---------------------------------------------------------------------------
 # Config

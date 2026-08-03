@@ -50,6 +50,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from session_check import check_session
+
 # MAXIMUM time offsets relative to BLE event timestamp T — per-move
 # windows are shrunk from these when neighboring moves are close (see
 # module docstring).
@@ -247,6 +249,20 @@ def postprocess(session_dir: Path, dry_run: bool = False,
         }
         with open(session_dir / "metadata.json", "w") as f:
             json.dump(metadata, f, indent=2)
+
+    # Endpoint gate: does this session's ground truth actually compose to
+    # the solve it claims? Catches untracked whole-cube rotations and wide
+    # turns, which OrientationTracker's frozen face map cannot represent and
+    # which nothing else downstream would notice. See session_check.py.
+    status, detail = check_session(session_dir)
+    if status == "FAIL":
+        print(f"\n  GROUND TRUTH FAILS ENDPOINT CHECK: {detail}")
+        print(f"  Every move after the reorientation is mislabelled. Do not "
+              f"train on this\n  session until the cause is found.")
+    elif status == "skip":
+        print(f"  Endpoint: not checked ({detail})")
+    else:
+        print(f"  Endpoint: ground truth composes to a solved cube ({detail})")
 
     print(f"  Labeled:  {len(labeled_moves)} moves  "
           f"({total_frames} frames: {still_count} STILL, {moving_count} MOVING)")
