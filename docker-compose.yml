@@ -1,0 +1,100 @@
+# One `docker compose up` brings up the whole product.
+#
+#   caddy         the only container that publishes a port. Routes /api/* to
+#                 django, /* to next.
+#   django        gunicorn, not reachable from outside the compose network
+#   next          node, likewise
+#   db            postgres, likewise
+#
+# Nothing but caddy publishes a port. That is deliberate: a directly
+# reachable Django is a second origin and a way around whatever the proxy
+# enforces, and a directly reachable Postgres is just a bad idea.
+#
+# THIS FILE PUBLISHES NOTHING AND MOUNTS NO CADDYFILE. Both are supplied by
+# whichever overlay is in use:
+#
+#   docker compose up                                    -> + override.yml (dev, :8080)
+#   docker compose -f docker-compose.yml \
+#                  -f docker-compose.prod.yml up -d      -> prod (:80/:443, real domain)
+#
+# Split this way because compose MERGES `ports` lists by appending. If the
+# dev `8080:8080` lived here, production would inherit it and publish an
+# extra plaintext port to the internet — a hole that no amount of correct
+# Caddyfile fixes.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - django
+      - next
+
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cubearena}
+      POSTGRES_USER: ${POSTGRES_USER:-cubearena}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      # django's start command runs migrate immediately, which fails against
+      # a Postgres that is still initialising. Gate on this rather than on
+      # "container started".
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cubearena} -d ${POSTGRES_DB:-cubearena}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  django:
+    build:
+      context: ./server
+    restart: unless-stopped
+    environment:
+      # Generate with:
+      #   python -c "import secrets; print(secrets.token_urlsafe(50))"
+      # Django refuses to start with DJANGO_DEBUG off and no key, because
+      # this value signs scrambles.
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-0}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,django}
+      DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-http://localhost:8080}
+      SITE_URL: ${SITE_URL:-http://localhost:8080}
+      POSTGRES_HOST: db
+      POSTGRES_DB: ${POSTGRES_DB:-cubearena}
+      POSTGRES_USER: ${POSTGRES_USER:-cubearena}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # Transactional relay, not a self-hosted SMTP server — see settings.py.
+      # Unset means mail is printed to the container log instead of sent.
+      EMAIL_HOST: ${EMAIL_HOST:-}
+      EMAIL_PORT: ${EMAIL_PORT:-587}
+      EMAIL_HOST_USER: ${EMAIL_HOST_USER:-}
+      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD:-}
+      DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL:-CubeArena <hello@localhost>}
+      WAITLIST_IP_SALT: ${WAITLIST_IP_SALT:-}
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS:-3}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # `..`-relative import: core/timing.py reads the anticheat thresholds
+      # from ble/move_detector/anticheat_gate.py rather than restating them.
+      # Read-only — the API has no business writing to the model tree.
+      - ./ble:/repo/ble:ro
+
+  next:
+    build:
+      context: ./web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+
+volumes:
+  caddy_data:
+  caddy_config:
+  pg_data:

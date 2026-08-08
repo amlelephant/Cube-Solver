@@ -1,0 +1,120 @@
+# Production overlay. ALWAYS used with the base file and NEVER with the dev
+# override:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# `deploy/deploy.sh` does exactly that, so you never have to remember it.
+# Naming both files explicitly is what stops compose auto-loading
+# docker-compose.override.yml and publishing dev's plaintext :8080 alongside.
+#
+# What this adds, and why each one earns its place:
+#
+#   * 80/443 and the real domain, with a certificate Caddy gets itself.
+#   * `no-new-privileges` + dropped capabilities everywhere. A container that
+#     cannot gain privileges cannot turn a code-execution bug into a root
+#     one via a setuid binary.
+#   * Read-only root filesystems where the service tolerates one, so an
+#     attacker with file-write cannot drop a webshell or persist anything.
+#   * A memory limit on every service. Without them one runaway process takes
+#     the whole box down rather than only itself, and on a single VM that is
+#     the difference between a broken feature and total downtime.
+#   * Capped logs. An unbounded json-file log filling the disk is the most
+#     common way a small VM dies, and it takes Postgres with it, because
+#     Postgres can no longer write either.
+
+services:
+  caddy:
+    ports:
+      # 80 is not optional: it answers the ACME HTTP-01 challenge and
+      # redirects to 443. Closing it breaks certificate RENEWAL silently,
+      # about three months after you close it.
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/caddy/Caddyfile.prod:/etc/caddy/Caddyfile:ro
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+      # Who may reach /api/admin/. Everyone else gets a 404 from Caddy.
+      ADMIN_ALLOW_CIDR: ${ADMIN_ALLOW_CIDR:-0.0.0.0/0}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add:
+      # Binding 80/443 needs exactly this and nothing else.
+      - NET_BIND_SERVICE
+    mem_limit: 256m
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  db:
+    security_opt:
+      - no-new-privileges:true
+    # Postgres starts as root and drops to the postgres user, which needs
+    # these and only these.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_READ_SEARCH, FOWNER, SETGID, SETUID]
+    # Sized for the 4 GB VM in DEPLOY.md: clear of the 128 MB shared_buffers
+    # default plus work_mem for a handful of connections, and still leaves
+    # room for everything else on the box.
+    mem_limit: 1g
+    logging: *logging
+
+  django:
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    read_only: true
+    # The only paths that legitimately need writing. tmpfs, so nothing an
+    # attacker writes survives a restart.
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    mem_limit: 1g
+    logging: *logging
+
+  next:
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      # Next writes its incremental cache here at runtime, production build
+      # included — a read-only mount without this 500s on the first request.
+      - /app/.next/cache:size=256m
+    mem_limit: 768m
+    logging: *logging
+
+  # Nightly pg_dump inside the compose network, so it reaches `db` by name
+  # and Postgres never has to be exposed to the host.
+  #
+  # A backup you have never restored is a hypothesis, not a backup.
+  # `deploy/restore.sh` is how you turn it into one, and DEPLOY.md schedules
+  # that test rather than leaving it to good intentions.
+  backup:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER:-cubearena}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      PGDATABASE: ${POSTGRES_DB:-cubearena}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+    volumes:
+      - ./deploy/backup.sh:/usr/local/bin/backup.sh:ro
+      - backups:/backups
+    entrypoint: ["/bin/sh", "/usr/local/bin/backup.sh", "--loop"]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    mem_limit: 256m
+    logging: *logging
+
+volumes:
+  backups:

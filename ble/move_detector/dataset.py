@@ -54,6 +54,7 @@ split would report memorization. Same reasoning as --holdout session in
 train_move_classifier.py.
 """
 
+import os
 import random
 from pathlib import Path
 
@@ -209,6 +210,9 @@ class OnsetClipDataset(Dataset):
 
     def __getitem__(self, i):
         si, start = self.index[i]
+        # No lazy-rebuild here, unlike JointClipDataset: this is the
+        # grayscale first-generation path, its SessionStreams carry no
+        # `path`, and it is not what the current pipeline trains.
         s = self.streams[si]
 
         block = s.clip_block(start, self.clip_len)
@@ -546,17 +550,76 @@ class JointArrayStream(ArrayStream):
             self.onset_idx, len(self.frames), count_radius)
 
 
+def frames_npy_path(npz_path: Path) -> Path:
+    """Sidecar holding just `frames`, uncompressed, so it can be mmapped."""
+    return Path(npz_path).with_suffix(".frames.npy")
+
+
+def ensure_frames_npy(npz_path: Path, force: bool = False) -> Path:
+    """Write (once) an uncompressed copy of a session's frames.
+
+    `detector_stream_color.npz` is savez_COMPRESSED, and a compressed member
+    of a zip cannot be memory-mapped — np.load has to inflate the whole array
+    into RAM. That is the root of the DataLoader problem: 44 sessions of
+    (N, 96, 96, 3) uint8 is ~3.2 GB, Windows spawns workers by PICKLING the
+    dataset, and 3.2 GB does not fit through the pipe (OSError [Errno 22]).
+
+    An uncompressed sidecar can be mmapped, which fixes both halves at once:
+    workers reconstruct their own streams from paths instead of receiving
+    frames through the pickle, and the pages they touch are served from the
+    OS page cache SHARED between processes — so N workers cost ~one copy of
+    RAM, not N.
+
+    Costs ~2x the npz on disk (gitignored, regenerable). Worth it: without
+    this the choice is 5x slower training or an OOM.
+    """
+    npz_path = Path(npz_path)
+    out = frames_npy_path(npz_path)
+    if out.is_file() and not force and out.stat().st_mtime >= npz_path.stat().st_mtime:
+        return out
+    with np.load(npz_path, allow_pickle=True) as z:
+        frames = z["frames"]
+    # PID in the temp name, then an atomic replace. Two things could
+    # otherwise go wrong: a half-written sidecar being mmapped as garbage,
+    # and — if this is ever reached from several workers at once — two
+    # processes writing the same temp path and interleaving. In the training
+    # flow the parent creates every sidecar before any worker spawns, so the
+    # second case should not arise; it costs nothing to make it impossible.
+    tmp = out.with_suffix(f".{os.getpid()}.tmp.npy")
+    try:
+        np.save(tmp, frames)
+        tmp.replace(out)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    return out
+
+
 class JointSessionStream(JointArrayStream):
-    """One prepared session loaded from its detector_stream_color.npz."""
+    """One prepared session loaded from its detector_stream_color.npz.
+
+    `mmap=True` reads frames from the uncompressed sidecar via np.memmap
+    instead of inflating them into RAM — see ensure_frames_npy. Everything
+    else in the npz (onsets, fps, name) is kilobytes and loads normally.
+    """
 
     def __init__(self, path: Path, sigma: float = SIGMA,
-                 count_radius: int = COUNT_RADIUS):
+                 count_radius: int = COUNT_RADIUS, mmap: bool = False):
+        path = Path(path)
         data = np.load(path, allow_pickle=True)
-        super().__init__(frames=data["frames"], name=str(data["name"]),
+        if mmap:
+            frames = np.load(ensure_frames_npy(path), mmap_mode="r")
+        else:
+            frames = data["frames"]
+        super().__init__(frames=frames, name=str(data["name"]),
                          fps=float(data["fps"]),
                          onset_idx=data["onset_idx"].astype(int),
                          onset_class=data["onset_class"].astype(int),
                          sigma=sigma, count_radius=count_radius)
+        #: Kept so a clip dataset can rebuild this stream inside a worker
+        #: from a path rather than shipping the frames through a pickle.
+        self.path = path
+        self.mmap = mmap
         self.crop_mode = (str(data["crop_mode"]) if "crop_mode" in data
                           else "unknown")
         # Written by prepare_data.py since 2026-08-03 (--labels). Streams
@@ -728,6 +791,112 @@ def augment_block_color(block: np.ndarray, rng: random.Random,
     return out.astype(np.uint8), flipped
 
 
+# --- speed (time-warp) augmentation -------------------------------------
+#
+# Added 2026-08-05. The corpus is slow — ~2.4 TPS median — because it is one
+# person recording at a comfortable pace, and speed_sim.py measured what
+# that costs: worst-case count retention falls from 0.98 at 2 TPS to 0.81 at
+# 6 TPS and 0.50 at 10 TPS. The onset arm is what collapses, and the obvious
+# reason is that it has never seen a fast turn. This augmentation gives it
+# some, out of the footage already recorded.
+#
+# The trick that makes it honest is that a clip is a FIXED number of frames
+# but not a fixed amount of TIME. To make a solve look faster, sample the
+# same clip_len frames across a WIDER span of source frames: the turns are
+# now closer together in frame space, which is precisely the crowding that
+# speed_sim identified as the failure mode.
+#
+# WHY THIS BELONGS ON THE CTC HEAD AND SITS AWKWARDLY ON THE DENSE ONE.
+# CTC's target is the ORDER of the labels, not their frame positions, so
+# resampling may land between two source frames and drop the exact onset
+# frame with no consequence — and a genuinely fast turn does exactly that
+# anyway, since its peak rarely coincides with a shutter. The joint model's
+# dense sigma=1 targets do not have that freedom: at speed 3 two onsets 6
+# source frames apart become 2 frames apart, which sigma=1 cannot represent
+# as two peaks. So the dense path clamps its speed (see MAX_DENSE_SPEED) and
+# the CTC path does not.
+#
+# BLUR IS NOT OPTIONAL HERE. Dropping frames compresses time without adding
+# the motion blur a real fast turn has — speed_sim.py flags this as making
+# its numbers optimistic. Training on sharp-but-crowded frames would be
+# worse than optimistic: it would hand the model a shortcut (crowded AND
+# sharp = fast) that no real footage contains, and the model would learn the
+# shortcut instead of the turn. So each surviving frame is the mean of the
+# source frames it absorbed, which approximates the longer effective
+# exposure. This is the same `--blur` path speed_sim measured, and it is
+# always on.
+AUG_SPEED_P     = 0.5     # P(a clip is time-warped at all)
+AUG_SPEED       = (1.2, 3.0)   # speed multiplier. 3.0 on a 2.4 TPS corpus
+                               #   reaches ~7 TPS — just past where the
+                               #   anticheat count gate currently abstains
+                               #   (anticheat_gate.separation_tps_limit()).
+MAX_DENSE_SPEED = 1.8     # cap for the dense-target path: beyond this,
+                          #   adjacent onsets collide under sigma=1 and the
+                          #   target silently becomes one peak where the
+                          #   labels say two — training the model to
+                          #   UNDER-count, the exact defect being fixed.
+
+
+def speed_warp_block(frames: np.ndarray, start: int, clip_len: int,
+                     speed: float) -> tuple[np.ndarray, float]:
+    """
+    Sample `clip_len + 1` frames spanning `clip_len * speed` source frames
+    from `start`, averaging absorbed frames (motion-blur approximation).
+
+    Returns (block, effective_speed). The block is laid out exactly like
+    ArrayStream.clip_block's: one lead-in frame first, so the diff channel
+    has a predecessor for every frame of the clip. The lead-in is sampled
+    one WARPED step back, not one source frame back — using the immediate
+    predecessor would give the clip's first diff the magnitude of a slow
+    frame pair while every other diff in it is fast, which is a seam the
+    model can key on.
+
+    `speed` is clamped to what the stream actually has left, so callers do
+    not have to special-case clips near the end; the effective value is
+    returned because the caller needs it to remap onsets consistently.
+    """
+    n = len(frames)
+    span = clip_len * speed
+    if start + span > n - 1:                       # clamp to available frames
+        span = max(float(clip_len), float(n - 1 - start))
+        speed = span / clip_len
+    step = span / clip_len
+
+    # sample centres, lead-in (j = -1) first
+    centres = start + np.arange(-1, clip_len, dtype=np.float64) * step
+    half = step / 2.0
+    lo = np.clip(np.floor(centres - half + 0.5).astype(int), 0, n - 1)
+    hi = np.clip(np.floor(centres + half + 0.5).astype(int), 0, n - 1)
+    hi = np.maximum(hi, lo + 1)
+    np.clip(hi, 0, n, out=hi)
+
+    out = np.empty((clip_len + 1,) + frames.shape[1:], dtype=frames.dtype)
+    for j in range(clip_len + 1):
+        a, b = lo[j], hi[j]
+        if b - a <= 1:
+            out[j] = frames[a]
+        else:
+            # float64 accumulate then round: at speed 3 this averages ~3
+            # uint8 frames, and integer-truncating each would bias dark.
+            out[j] = frames[a:b].mean(axis=0).round().astype(frames.dtype)
+    return out, speed
+
+
+def speed_warp_onsets(onset_idx: np.ndarray, start: int, clip_len: int,
+                      speed: float) -> np.ndarray:
+    """Positions, within a warped clip, of the onsets that land inside it.
+
+    Returns clip-relative integer frame indices in [0, clip_len). Onsets
+    outside the warped span are dropped. Order is preserved, which is all
+    the CTC path needs; the dense path uses the positions too.
+    """
+    step = speed
+    rel = (np.asarray(onset_idx, dtype=np.float64) - start) / step
+    j = np.floor(rel + 0.5).astype(int)
+    keep = (j >= 0) & (j < clip_len)
+    return j[keep], keep
+
+
 class JointClipDataset(Dataset):
     """
     Stage A counterpart of OnsetClipDataset: same fixed-length clip
@@ -741,11 +910,15 @@ class JointClipDataset(Dataset):
     def __init__(self, streams: list[JointSessionStream],
                 clip_len: int = CLIP_LEN, stride: int = 24,
                 augment: bool = True, seed: int = 0,
-                aug_strength: float = 1.0):
+                aug_strength: float = 1.0, speed_aug: float = 0.0):
         self.streams  = streams
         self.clip_len = clip_len
         self.augment  = augment
         self.aug_strength = aug_strength
+        # Probability that a clip gets time-warped. 0.0 keeps the previous
+        # behaviour exactly, so this is A/B-able against existing
+        # checkpoints rather than a change that can only be taken whole.
+        self.speed_aug = float(speed_aug)
         self.rng      = random.Random(seed)
         self.index    = []
         for si, s in enumerate(streams):
@@ -754,17 +927,80 @@ class JointClipDataset(Dataset):
                 continue
             self.index += [(si, st) for st in range(0, last + 1, stride)]
 
+        # -- what makes DataLoader workers possible on Windows.
+        #
+        # Windows has no fork; it spawns workers by PICKLING this object. The
+        # streams hold every frame of every session (~3.2 GB for the current
+        # corpus), which does not fit through the spawn pipe — it fails with
+        # OSError [Errno 22] before any of this class's code runs. The
+        # workaround until now was --workers 0, at ~5x the epoch time.
+        #
+        # So record how to REBUILD each stream, and drop the loaded ones on
+        # the way out (__getstate__). The worker reconstructs them from disk,
+        # memory-mapped, so the pages are shared by the OS page cache rather
+        # than copied per worker. The pickle becomes a list of paths.
+        #
+        # Streams built in memory (live capture, speed_sim) have no path and
+        # cannot be rebuilt; those fall back to the old behaviour, which is
+        # correct because they are never used with workers anyway.
+        self._specs = [(getattr(s, "path", None), s.sigma,
+                        getattr(s, "count_radius", COUNT_RADIUS))
+                       for s in streams]
+        self._lazy = all(p is not None for p, _, _ in self._specs)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        if self._lazy:
+            state["streams"] = None       # rebuilt in the worker, from paths
+        return state
+
+    def _get_streams(self):
+        """Streams, reconstructing them (mmapped) if we were unpickled."""
+        if self.streams is None:
+            self.streams = [
+                JointSessionStream(p, sigma=sg, count_radius=cr, mmap=True)
+                for (p, sg, cr) in self._specs
+            ]
+        return self.streams
+
     def __len__(self) -> int:
         return len(self.index)
 
+    def _pick_speed(self, cap: float) -> float:
+        """Sampled speed multiplier, or 1.0 for no warp."""
+        if not self.speed_aug or self.rng.random() >= self.speed_aug:
+            return 1.0
+        lo, hi = AUG_SPEED
+        return min(cap, self.rng.uniform(lo, hi))
+
     def __getitem__(self, i):
         si, start = self.index[i]
-        s = self.streams[si]
+        s = self._get_streams()[si]
 
-        block = s.clip_block(start, self.clip_len)
-        y_onset = s.target[start:start + self.clip_len].copy()
-        y_class = s.class_target[start:start + self.clip_len].copy()
-        y_count = s.count_target[start:start + self.clip_len].copy()
+        speed = self._pick_speed(MAX_DENSE_SPEED)
+        if speed > 1.0:
+            # Dense targets are rebuilt from the REMAPPED onsets rather than
+            # sliced from the stream's precomputed ones — the stream's
+            # targets are in source-frame time and mean nothing after a
+            # warp. Rebuilding also keeps sigma fixed in CLIP frames, which
+            # is what the model sees, instead of implicitly narrowing it.
+            block, speed = speed_warp_block(s.frames, start, self.clip_len,
+                                            speed)
+            j, keep = speed_warp_onsets(s.onset_idx, start, self.clip_len,
+                                        speed)
+            cls = s.onset_class[keep] if len(s.onset_class) else s.onset_class
+            warped = JointArrayStream(
+                frames=block[1:], name=s.name, fps=s.fps * speed,
+                onset_idx=j, onset_class=cls, sigma=s.sigma,
+                count_radius=s.count_radius)
+            y_onset = warped.target.copy()
+            y_class = warped.class_target.copy()
+            y_count = warped.count_target.copy()
+        else:
+            block = s.clip_block(start, self.clip_len)
+            y_onset = s.target[start:start + self.clip_len].copy()
+            y_class = s.class_target[start:start + self.clip_len].copy()
+            y_count = s.count_target[start:start + self.clip_len].copy()
 
         if self.augment:
             block, flipped = augment_block_color(block, self.rng,
@@ -803,13 +1039,32 @@ class CTCClipDataset(JointClipDataset):
 
     def __getitem__(self, i):
         si, start = self.index[i]
-        s = self.streams[si]
-        end = start + self.clip_len
+        s = self._get_streams()[si]
 
-        block = s.clip_block(start, self.clip_len)
+        # Unlike the dense path this is uncapped (AUG_SPEED's full range):
+        # the target is label ORDER, which a warp cannot disturb, so there
+        # is no sigma collision to respect. The only real constraint is
+        # CTC's own — the input must be at least as long as the label
+        # sequence — and the guard below enforces it.
+        speed = self._pick_speed(float(AUG_SPEED[1]))
+        if speed > 1.0:
+            block, speed = speed_warp_block(s.frames, start, self.clip_len,
+                                            speed)
+            end = start + int(round(self.clip_len * speed))
+        else:
+            block = s.clip_block(start, self.clip_len)
+            end = start + self.clip_len
+
         sel = (s.onset_idx >= start) & (s.onset_idx < end)
         order = np.argsort(s.onset_idx[sel])
         labels = s.onset_class[sel][order].astype(np.int64)
+
+        if len(labels) > self.clip_len:
+            # Cannot happen at CLIP_LEN=96 (p90 is 10 onsets, max 22, and
+            # speed 3 tops out around 66) but CTC's loss is undefined if it
+            # ever did, and silently returning an impossible target would
+            # surface as a NaN a long way from here.
+            labels = labels[:self.clip_len]
 
         if self.augment:
             block, flipped = augment_block_color(block, self.rng,
@@ -856,17 +1111,24 @@ def ctc_collate(batch):
 
 
 def load_joint_streams(session_dirs: list[Path], sigma: float = SIGMA,
-                       count_radius: int = COUNT_RADIUS
-                       ) -> list[JointSessionStream]:
+                       count_radius: int = COUNT_RADIUS,
+                       mmap: bool = False) -> list[JointSessionStream]:
     """Colour-stream counterpart of load_streams — reads
     detector_stream_color.npz (prepare_data.py --color), not the deployed
-    grayscale detector_stream.npz."""
+    grayscale detector_stream.npz.
+
+    `mmap=True` keeps the frames on disk (see ensure_frames_npy). Training
+    wants it: it drops the parent's resident set by ~3 GB and, more
+    importantly, is what lets DataLoader workers share those pages instead
+    of each inflating its own copy.
+    """
     streams, missing = [], []
     for d in sorted(session_dirs):
         p = d / STREAM_FILE_COLOR
         if p.exists():
             streams.append(JointSessionStream(p, sigma=sigma,
-                                              count_radius=count_radius))
+                                              count_radius=count_radius,
+                                              mmap=mmap))
         else:
             missing.append(d.name)
     if missing:

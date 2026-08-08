@@ -1,0 +1,198 @@
+[
+  {
+    "session": "solve_20260721_101219",
+    "true": 83,
+    "pred": 83,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260721_102141",
+    "true": 101,
+    "pred": 102,
+    "err": 1,
+    "seen": true
+  },
+  {
+    "session": "solve_20260721_102432",
+    "true": 139,
+    "pred": 139,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260721_102711",
+    "true": 152,
+    "pred": 150,
+    "err": -2,
+    "seen": false
+  },
+  {
+    "session": "solve_20260721_103149",
+    "true": 90,
+    "pred": 90,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260721_103524",
+    "true": 192,
+    "pred": 191,
+    "err": -1,
+    "seen": true
+  },
+  {
+    "session": "solve_20260721_110339",
+    "true": 104,
+    "pred": 104,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260721_110527",
+    "true": 82,
+    "pred": 82,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260721_110811",
+    "true": 71,
+    "pred": 71,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260722_100644",
+    "true": 200,
+    "pred": 200,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260722_100959",
+    "true": 216,
+    "pred": 221,
+    "err": 5,
+    "seen": true
+  },
+  {
+    "session": "solve_20260722_101225",
+    "true": 178,
+    "pred": 176,
+    "err": -2,
+    "seen": false
+  },
+  {
+    "session": "solve_20260723_104750_scramble",
+    "true": 28,
+    "pred": 28,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260723_104750_solve",
+    "true": 114,
+    "pred": 114,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260723_105530_scramble",
+    "true": 24,
+    "pred": 24,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260723_105530_solve",
+    "true": 106,
+    "pred": 106,
+    "err": 0,
+    "seen": false
+  },
+  {
+    "session": "solve_20260724_094947_scramble",
+    "true": 26,
+    "pred": 26,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260724_094947_solve",
+    "true": 70,
+    "pred": 70,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260724_095506_scramble",
+    "true": 22,
+    "pred": 22,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260724_095506_solve",
+    "true": 128,
+    "pred": 124,
+    "err": -4,
+    "seen": true
+  },
+  {
+    "session": "solve_20260724_100120_scramble",
+    "true": 22,
+    "pred": 22,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260724_100120_solve",
+    "true": 134,
+    "pred": 134,
+    "err": 0,
+    "seen": false
+  },
+  {
+    "session": "solve_20260724_101131_scramble",
+    "true": 20,
+    "pred": 20,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260724_101131_solve",
+    "true": 122,
+    "pred": 122,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260724_102119_scramble",
+    "true": 22,
+    "pred": 22,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260724_102119_solve",
+    "true": 134,
+    "pred": 134,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260724_103307_scramble",
+    "true": 22,
+    "pred": 22,
+    "err": 0,
+    "seen": true
+  },
+  {
+    "session": "solve_20260724_103307_solve",
+    "true": 98,
+    "pred": 98,
+    "err": 0,
+    "seen": true
+  }
+]

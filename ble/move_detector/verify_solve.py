@@ -125,10 +125,39 @@ them is how a video becomes a move sequence:
 both seeds: move error rate 8.5% -> 5.8%, phantoms down 64%, verified
 sessions 1/8 -> 3/8 — but it has never been run on a live take, which is
 the regime that has broken every previous offline result in this project.
-That is what this script is for. The default is unchanged so the two can
-be compared on the same sitting.
+That is what this script is for. The default arm is unchanged so the two
+can be compared on the same sitting.
 
     python verify_solve.py --ble --front blue --top yellow --ctc --save
+
+WHICH CTC CHECKPOINT, AND WHY IT MATTERS HERE
+---------------------------------------------
+--ctc-model now defaults to `checkpoints/move_ctc_spd_s0.pt`, the
+SPEED-AUGMENTED model (2026-08-05, `--speed-aug 0.5`). It is not better on
+the offline val split — 5.4% MER against aug44's 5.26%, a tie — and that is
+the point: the val split is slow footage, so it cannot see what this model
+was trained for.
+
+What it IS better at is counting moves when the solve is fast, which is the
+regime a live take actually reaches and the offline corpus does not (~2.4
+TPS median). Worst held-out session retention, predicted/true move count,
+both seeds:
+
+    TPS      aug44 -> spd (s0)     aug44 -> spd (s1)
+     6      0.809 -> 0.954        0.763 -> 0.842
+     8      0.632 -> 0.882        0.612 -> 0.796
+    10      0.500 -> 0.770        0.428 -> 0.691
+
+That is what pushed the anticheat gate's abstain band from 7.11 to 9.62 TPS
+(anticheat_gate.RETENTION_FLOOR). **Those constants are calibrated on THIS
+checkpoint.** Passing a different --ctc-model without re-running
+`speed_sim.py --blur` and updating RETENTION_FLOOR leaves the gate believing
+a retention curve the running model does not have.
+
+Caveat that a live take is exactly the right way to attack: the speed gains
+were measured by SIMULATING speed (dropping frames, blur-approximating the
+longer exposure). Real fast footage has motion blur those frames only
+approximate. Solve fast on camera and see whether the count holds.
 
 --lm additionally fuses move_lm.py's n-gram prior into the CTC beam. It is
 regime-dependent and measured as such: a gain cross-day, a loss on the
@@ -1277,8 +1306,14 @@ def main():
                         "peak-picking a threshold. Measured on the held-out "
                         "set, both seeds: MER 8.5%% -> 5.8%%, phantoms -64%%, "
                         "verified 1/8 -> 3/8.")
-    p.add_argument("--ctc-model", type=str, default="checkpoints/move_ctc_s0.pt",
-                   help="Checkpoint to use with --ctc")
+    p.add_argument("--ctc-model", type=str,
+                   default="checkpoints/move_ctc_spd_s0.pt",
+                   help="Checkpoint to use with --ctc. Defaults to the "
+                        "SPEED-AUGMENTED model (2026-08-05) — see the "
+                        "docstring; the anticheat gate's retention constants "
+                        "are calibrated on this checkpoint, so changing it "
+                        "here without re-running speed_sim.py desynchronises "
+                        "the two.")
     p.add_argument("--ctc-beam", type=int, default=16,
                    help="Width of the CTC prefix beam search over frames. "
                         "Unrelated to --beam, which is the reconstruct.py "

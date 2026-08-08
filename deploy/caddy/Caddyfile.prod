@@ -1,0 +1,135 @@
+# Production Caddy config. The dev one is ../../Caddyfile; this is its
+# public-facing counterpart and the two must stay in sync about ROUTING —
+# only the TLS, headers and limits differ.
+#
+# The domain comes from the environment so this file holds no site-specific
+# value and can be committed. `{$DOMAIN}` is substituted by Caddy at load.
+
+{
+	email {$ACME_EMAIL}
+
+	# Do not advertise the server. It changes nothing about how hard the
+	# stack is to break into, but it does keep this host out of the trivial
+	# "everything running Caddy 2.x" scan results.
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+# HTTP: redirect everything, but let ACME through. Caddy handles both
+# automatically for a site defined with a hostname — this block exists only
+# so the redirect is explicit rather than implied.
+{$DOMAIN} {
+	encode zstd gzip
+
+	# --- security headers ------------------------------------------------
+	header {
+		# HSTS. One year, no preload and no subdomains yet — preload is a
+		# one-way door (browsers cache it and removal takes months), so it
+		# goes on only once the domain is settled and HTTPS-only for good.
+		Strict-Transport-Security "max-age=31536000"
+
+		# Stop the browser guessing a response is a type we did not send.
+		# This is the other half of the image-upload defence in
+		# SETTINGS_AUDIT.md §3: re-encode on the server AND refuse sniffing
+		# here, so a polyglot file cannot be executed as script.
+		X-Content-Type-Options "nosniff"
+
+		# No framing at all. There is no legitimate embed of this app, and
+		# clickjacking a "verify my solve" button is a real attack.
+		X-Frame-Options "DENY"
+
+		# Send the origin only, and only to same-scheme destinations. Full
+		# URLs leak solve ids and usernames into other people's logs.
+		Referrer-Policy "strict-origin-when-cross-origin"
+
+		# The camera is the ONE capability this product genuinely needs, and
+		# only for itself. Everything else is denied outright, so a compromised
+		# third-party script cannot reach for a microphone or geolocation.
+		Permissions-Policy "camera=(self), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()"
+
+		# Cross-origin isolation. `same-origin` on the opener policy severs
+		# the window.opener link an attacker page would otherwise keep.
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+
+		# Caddy advertises itself by default.
+		-Server
+	}
+
+	# --- request size limits ---------------------------------------------
+	#
+	# The evidence bundle is the only large upload this API will ever take,
+	# and it is not built yet (TODO 1). Until it is, nothing legitimate
+	# posts more than a few KB, so a low ceiling costs nothing and closes
+	# the cheapest memory-exhaustion attack there is: a slow multi-gigabyte
+	# POST that gunicorn buffers.
+	#
+	# RAISE THE /api/solves/ LIMIT when frame upload lands, and only that
+	# route — not this global one.
+	request_body {
+		max_size 2MB
+	}
+
+	# --- routing (mirrors ../../Caddyfile) --------------------------------
+	#
+	# The Django admin, first, because it is the highest-value target here:
+	# it reads and writes every table and it is a well-known URL that
+	# credential-stuffing bots find without looking.
+	#
+	# ADMIN_ALLOW_CIDR in .env restricts it to your own address. Leave it as
+	# the default 0.0.0.0/0 only until you know your source address — a
+	# password is the only thing between the internet and every row.
+	# Django's own auth still applies either way; this is the outer layer.
+	@admin path /api/admin/*
+	handle @admin {
+		@notallowed not remote_ip {$ADMIN_ALLOW_CIDR}
+		respond @notallowed 404
+		reverse_proxy django:8000 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-For {remote_host}
+			header_up Host {host}
+		}
+	}
+
+	handle /api/* {
+		reverse_proxy django:8000 {
+			# Django must be told the original request was HTTPS, or every
+			# redirect downgrades to http:// and secure cookies never set.
+			# Paired with SECURE_PROXY_SSL_HEADER in settings.py.
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-For {remote_host}
+			header_up Host {host}
+		}
+	}
+
+	# Django's collected static files (admin CSS, DRF's browsable API).
+	handle /static/* {
+		reverse_proxy django:8000
+		header Cache-Control "public, max-age=604800"
+	}
+
+	handle {
+		reverse_proxy next:3000
+	}
+
+	# --- logging ----------------------------------------------------------
+	#
+	# Access logs are what let you answer "was this account being brute
+	# forced" after the fact. Capped, because see docker-compose.prod.yml on
+	# what an unbounded log does to a small VM.
+	log {
+		output file /data/access.log {
+			roll_size 10MB
+			roll_keep 5
+			roll_keep_for 336h
+		}
+		format json
+	}
+}
+
+# www -> apex, so both resolve and only one is canonical. Harmless if no www
+# record exists; Caddy simply never gets asked.
+www.{$DOMAIN} {
+	redir https://{$DOMAIN}{uri} permanent
+}

@@ -1,0 +1,236 @@
+[
+  {
+    "session": "solve_20260721_102711",
+    "target_tps": 2,
+    "tps": 2.00029257240805,
+    "stage": 1,
+    "true": 152,
+    "pred": 140,
+    "err": -12
+  },
+  {
+    "session": "solve_20260721_102711",
+    "target_tps": 3,
+    "tps": 2.999781300238502,
+    "stage": 1,
+    "true": 152,
+    "pred": 136,
+    "err": -16
+  },
+  {
+    "session": "solve_20260721_102711",
+    "target_tps": 4,
+    "tps": 3.998832040019949,
+    "stage": 1,
+    "true": 152,
+    "pred": 125,
+    "err": -27
+  },
+  {
+    "session": "solve_20260721_102711",
+    "target_tps": 5,
+    "tps": 4.997445079586814,
+    "stage": 1,
+    "true": 152,
+    "pred": 115,
+    "err": -37
+  },
+  {
+    "session": "solve_20260721_102711",
+    "target_tps": 6,
+    "tps": 6.003509681135212,
+    "stage": 1,
+    "true": 152,
+    "pred": 116,
+    "err": -36
+  },
+  {
+    "session": "solve_20260721_102711",
+    "target_tps": 8,
+    "tps": 8.00467957484695,
+    "stage": 2,
+    "true": 152,
+    "pred": 93,
+    "err": -59
+  },
+  {
+    "session": "solve_20260721_102711",
+    "target_tps": 10,
+    "tps": 10.005849468558688,
+    "stage": 2,
+    "true": 152,
+    "pred": 65,
+    "err": -87
+  },
+  {
+    "session": "solve_20260722_101225",
+    "target_tps": 3,
+    "tps": 2.999453739481842,
+    "stage": 1,
+    "true": 178,
+    "pred": 179,
+    "err": 1
+  },
+  {
+    "session": "solve_20260722_101225",
+    "target_tps": 4,
+    "tps": 4.000768386045391,
+    "stage": 1,
+    "true": 178,
+    "pred": 174,
+    "err": -4
+  },
+  {
+    "session": "solve_20260722_101225",
+    "target_tps": 5,
+    "tps": 5.000024849164306,
+    "stage": 1,
+    "true": 178,
+    "pred": 167,
+    "err": -11
+  },
+  {
+    "session": "solve_20260722_101225",
+    "target_tps": 6,
+    "tps": 5.998907478963684,
+    "stage": 1,
+    "true": 178,
+    "pred": 158,
+    "err": -20
+  },
+  {
+    "session": "solve_20260722_101225",
+    "target_tps": 8,
+    "tps": 8.001536772090782,
+    "stage": 2,
+    "true": 178,
+    "pred": 143,
+    "err": -35
+  },
+  {
+    "session": "solve_20260722_101225",
+    "target_tps": 10,
+    "tps": 9.990703857489052,
+    "stage": 2,
+    "true": 178,
+    "pred": 102,
+    "err": -76
+  },
+  {
+    "session": "solve_20260723_105530_solve",
+    "target_tps": 2,
+    "tps": 2.000073388502702,
+    "stage": 1,
+    "true": 106,
+    "pred": 108,
+    "err": 2
+  },
+  {
+    "session": "solve_20260723_105530_solve",
+    "target_tps": 3,
+    "tps": 2.9991675411006584,
+    "stage": 1,
+    "true": 106,
+    "pred": 104,
+    "err": -2
+  },
+  {
+    "session": "solve_20260723_105530_solve",
+    "target_tps": 4,
+    "tps": 3.9976341219947216,
+    "stage": 1,
+    "true": 106,
+    "pred": 109,
+    "err": 3
+  },
+  {
+    "session": "solve_20260723_105530_solve",
+    "target_tps": 5,
+    "tps": 5.003328240735533,
+    "stage": 1,
+    "true": 106,
+    "pred": 113,
+    "err": 7
+  },
+  {
+    "session": "solve_20260723_105530_solve",
+    "target_tps": 6,
+    "tps": 6.003993888882639,
+    "stage": 1,
+    "true": 106,
+    "pred": 119,
+    "err": 13
+  },
+  {
+    "session": "solve_20260723_105530_solve",
+    "target_tps": 8,
+    "tps": 7.995268243989443,
+    "stage": 2,
+    "true": 106,
+    "pred": 102,
+    "err": -4
+  },
+  {
+    "session": "solve_20260723_105530_solve",
+    "target_tps": 10,
+    "tps": 10.006656481471065,
+    "stage": 2,
+    "true": 106,
+    "pred": 80,
+    "err": -26
+  },
+  {
+    "session": "solve_20260724_100120_solve",
+    "target_tps": 3,
+    "tps": 3.0009548929955225,
+    "stage": 1,
+    "true": 134,
+    "pred": 134,
+    "err": 0
+  },
+  {
+    "session": "solve_20260724_100120_solve",
+    "target_tps": 4,
+    "tps": 4.001273190660696,
+    "stage": 1,
+    "true": 134,
+    "pred": 132,
+    "err": -2
+  },
+  {
+    "session": "solve_20260724_100120_solve",
+    "target_tps": 5,
+    "tps": 5.001591488325871,
+    "stage": 1,
+    "true": 134,
+    "pred": 132,
+    "err": -2
+  },
+  {
+    "session": "solve_20260724_100120_solve",
+    "target_tps": 6,
+    "tps": 6.001909785991045,
+    "stage": 1,
+    "true": 134,
+    "pred": 135,
+    "err": 1
+  },
+  {
+    "session": "solve_20260724_100120_solve",
+    "target_tps": 8,
+    "tps": 8.01051704504781,
+    "stage": 2,
+    "true": 134,
+    "pred": 121,
+    "err": -13
+  },
+  {
+    "session": "solve_20260724_100120_solve",
+    "target_tps": 10,
+    "tps": 10.028128570109727,
+    "stage": 2,
+    "true": 134,
+    "pred": 97,
+    "err": -37
+  }
+]

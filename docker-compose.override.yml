@@ -1,0 +1,13 @@
+# Local development. Compose loads this AUTOMATICALLY on a bare
+# `docker compose up`, so dev needs no flags and production needs explicit
+# ones — the safe default is the one you get by accident.
+#
+# Everything here is the stuff that must NOT reach a public server: a
+# plaintext port, no TLS, and a Caddyfile with `auto_https off`.
+
+services:
+  caddy:
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro

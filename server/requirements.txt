@@ -1,0 +1,9 @@
+# API server only. The CV/ML stack lives in the repo-root requirements.txt
+# and is deliberately NOT installed here — this container serves JSON and
+# must stay small. The re-verification worker that does need torch will be a
+# separate image (SYSTEM_DESIGN S3).
+Django>=5.1,<6
+djangorestframework>=3.15
+django-allauth>=65.3
+psycopg[binary]>=3.2
+gunicorn>=23

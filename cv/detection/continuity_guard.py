@@ -77,6 +77,31 @@ can be distinguished from a swap without a human looking.
                    (dq_analysis_stall). Enforced only once a cube is being
                    tracked; model-load warmup and pre-cube idle are exempt.
 
+Batch-testing real ble/training_data sessions (2026-08-03, all legit solves,
+none deliberately swapped — see batch_test_guard.py) found two false-DQ
+mechanisms, one fixed and one still open:
+  * BEST-BOX SELECTION (fixed) — a static background object (a room
+    fixture: a fish-tank stand, a dresser corner) was briefly MORE
+    confident than the real cube and hijacked best-box selection for a
+    frame, registering a false dq_teleport when tracking snapped back.
+    _pick_best() now prefers the box nearest the previously-tracked
+    position (TRACK_CONTINUITY_RADIUS) over raw confidence — this doesn't
+    touch the uniqueness count, so it can't be gamed by a still or moving
+    decoy.
+  * STATIC SECONDARY BOXES (open, NOT fixed) — the same kind of fixture
+    sustained past MULTI_DQ_HITS and false-DQ'd via two_cubes (6 of 10
+    false-DQs in the batch, the dominant cause). A within-window "has this
+    box moved" check was prototyped and reverted: on this guard's 1s
+    MULTI_WINDOW_S timescale, a real second cube held still for a second
+    (e.g. propped on a table edge) is not distinguishable from furniture
+    that's been there for hours — the synthetic adversarial suite confirmed
+    this concretely (sustained-two-cubes and diagonal-touching-cubes tests
+    both got waved through). The safe version of this fix is a pre-solve
+    background calibration step (snapshot the empty scene before the
+    tracked interval starts, exempt only boxes seen in that snapshot) —
+    same shape as state_finder.py's orange/red run_calibration() — not yet
+    built; needs wiring into the actual capture flow, not just the guard.
+
 Verdicts: "pass" | "dq" (two-tier — no human-review tier, see above).
 
 The core state machine (ContinuityGuard) is pure — it consumes
@@ -157,9 +182,16 @@ MULTI_WINDOW_S  = 1.0    # ...within this rolling window. Below this bar every
 DUP_IOU         = 0.40   # boxes overlapping this much are one cube (YOLO dup)
 ADJ_GAP_FRAC    = 0.15   # boxes whose edges are closer than this fraction of
                          #   the smaller box's diagonal are "touching"...
-MERGE_ASPECT    = 1.6    # ...and merge into one cube IF their union box is no
+MERGE_ASPECT    = 1.8    # ...and merge into one cube IF their union box is no
                          #   more elongated than this (two faces of one cube);
-                         #   two real cubes side-by-side union to ~2:1 → kept
+                         #   widened 1.6 -> 1.8 (2026-08-03): batch-testing
+                         #   against real ble/training_data sessions found a
+                         #   single tilted cube split top/bottom-half by YOLO
+                         #   unioning to 1.63 (verified visually — one cube,
+                         #   both hands, no swap) and wrongly kept as two,
+                         #   hard-DQing a legit solve. Two real cubes
+                         #   side-by-side still union to ~2:1 → kept, with
+                         #   comfortable margin either side of the new bar.
 MERGE_COVER     = 0.75   # ...AND the two boxes tile at least this fraction of
                          #   their union's area (2026-07-18). A genuine face
                          #   split covers ~95%+ of its union; two real cubes
@@ -190,6 +222,17 @@ FRAME_STALL_DQ_S = 0.20  # cadence: wall-clock time between analyzed frames
                          #   ~0.045s, so this is still a 4x hiccup allowance,
                          #   and it shrinks the blind window an attacker gets
                          #   from a stalled pipeline.
+TRACK_CONTINUITY_RADIUS = 1.0  # trajectory: when picking which box is "the"
+                         #   cube this frame, prefer the one nearest the
+                         #   previous tracked position (within this many
+                         #   diagonals) over the most confident box (added
+                         #   2026-08-03: a background object briefly MORE
+                         #   confident than the real cube — e.g. 0.81 vs 0.76
+                         #   — hijacked best-box selection for one frame and
+                         #   registered as a teleport when tracking snapped
+                         #   back). Falls back to highest confidence only when
+                         #   nothing is near the last position (first frame,
+                         #   genuine occlusion recovery).
 
 
 def _iou(a, b):
@@ -217,6 +260,31 @@ def _sig_dist(a, b):
 
 def _diag(b):
     return ((b[2] - b[0]) ** 2 + (b[3] - b[1]) ** 2) ** 0.5
+
+
+def pick_continuity(boxes, ref_box, radius=None):
+    """Pick the box nearest ref_box's center (within `radius` diagonals) over
+    raw confidence; falls back to highest confidence when ref_box is None or
+    nothing is near it (bootstrap / genuine occlusion recovery). Shared by
+    ContinuityGuard._pick_best and mine_hard_negatives.py, which both need to
+    know "which box is the cube we were already tracking" rather than
+    whichever box YOLO happened to be most confident about this frame."""
+    if radius is None:
+        radius = TRACK_CONTINUITY_RADIUS
+    if ref_box is None:
+        return max(boxes, key=lambda b: b[4])
+    diag = max(1.0, _diag(ref_box))
+    lx1, ly1, lx2, ly2 = ref_box[:4]
+    lcx, lcy = (lx1 + lx2) / 2, (ly1 + ly2) / 2
+
+    def dist(b):
+        cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+        return ((cx - lcx) ** 2 + (cy - lcy) ** 2) ** 0.5 / diag
+
+    nearest = min(boxes, key=dist)
+    if dist(nearest) <= radius:
+        return nearest
+    return max(boxes, key=lambda b: b[4])
 
 
 def _edge_gap(a, b):
@@ -317,6 +385,14 @@ class ContinuityGuard:
         mx, my = EDGE_MARGIN * self.fw, EDGE_MARGIN * self.fh
         return cx < mx or cy < my or cx > self.fw - mx or cy > self.fh - my
 
+    def _pick_best(self, boxes):
+        # Prefer continuity with the cube we're already tracking over raw
+        # confidence — see TRACK_CONTINUITY_RADIUS. A background object that
+        # is momentarily MORE confident than the real cube must not hijack
+        # the tracked identity for a frame (that hijack-and-snap-back is
+        # exactly what a false teleport DQ looks like).
+        return pick_continuity(boxes, self.last_box)
+
     # -- public -------------------------------------------------------------
 
     def update(self, t, boxes, sig=None):
@@ -338,6 +414,7 @@ class ContinuityGuard:
 
         boxes = dedup_boxes([b for b in boxes if b[4] >= 0.0])
         confident = [b for b in boxes if b[4] >= MULTI_CONF]
+        best = self._pick_best(boxes) if boxes else None
 
         # 1. UNIQUENESS ------------------------------------------------------
         if len(confident) >= 2:
@@ -355,7 +432,6 @@ class ContinuityGuard:
 
         # 2 + 3. PRESENCE / TRAJECTORY --------------------------------------
         if boxes:
-            best = max(boxes, key=lambda b: b[4])
             if self.last_seen_t is not None:
                 gap = t - self.last_seen_t
                 self.max_gap = max(self.max_gap, gap)

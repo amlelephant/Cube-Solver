@@ -1,0 +1,57 @@
+# One origin, two processes. This file is the whole answer to "do we have to
+# host the frontend and backend separately" — no.
+#
+#   /api/*  -> Django (gunicorn)
+#   /*      -> Next (node)
+#
+# Because both are served from the same scheme+host+port, the browser
+# considers them the same origin, so:
+#   * there is NO CORS anywhere in this stack,
+#   * session cookies are first-party and just work,
+#   * there is one TLS cert and one domain to renew and pay for.
+#
+# If you ever need to add CORS headers to make something work, the routing is
+# wrong — fix it here rather than punching a hole in the API.
+
+{
+	# Local dev: no TLS, no ACME. Comment this block out in production and
+	# Caddy will provision a real certificate automatically from the site
+	# address below.
+	auto_https off
+}
+
+:8080 {
+	encode gzip
+
+	# Order matters: the API prefix is matched first, everything else falls
+	# through to Next. Django's admin is deliberately mounted under /api/
+	# (config/urls.py) so this single rule covers it too.
+	handle /api/* {
+		reverse_proxy django:8000 {
+			# Django needs to know the original request was HTTPS, or every
+			# redirect downgrades and secure cookies never set. Paired with
+			# SECURE_PROXY_SSL_HEADER in settings.py.
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+
+	# Django's collected static files (admin CSS, DRF's browsable API).
+	# Without this the admin renders as unstyled HTML and looks broken.
+	handle /static/* {
+		reverse_proxy django:8000
+	}
+
+	handle {
+		reverse_proxy next:3000
+	}
+}
+
+# Production: replace the `:8080` block above with your domain, e.g.
+#
+#   cubearena.app {
+#       ... identical handle blocks ...
+#   }
+#
+# and delete the `auto_https off` global. Caddy then gets and renews a
+# Let's Encrypt certificate on its own with no further configuration.

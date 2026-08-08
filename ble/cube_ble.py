@@ -73,6 +73,33 @@ CMD_GET_CUBE_TYPE = bytes([0x56])
 CMD_DISABLE_ORIENTATION = bytes([0x37])  # kills the 15/sec quaternion spam
 CMD_ENABLE_ORIENTATION  = bytes([0x38])
 
+# --- MsgOrientation payload layout -----------------------------------------
+#
+# THIS LAYOUT IS A REASONED GUESS, NOT A VERIFIED FACT, and the code below is
+# built so the first recorded session confirms or corrects it without needing
+# a second one. The GoCube protocol reference documents MsgOrientation as
+# quaternion telemetry, but nothing in this repo has ever parsed it — the
+# stream was disabled at connect since the module was written, so no payload
+# has ever been observed here.
+#
+# The assumption: 8 payload bytes = 4 signed big-endian int16, each divided
+# by QUAT_SCALE, in QUAT_ORDER.
+#
+# WHY THAT IS SAFE TO SHIP UNTESTED: a quaternion encoding a rotation is a
+# UNIT quaternion, so |q| == 1 is a free checksum on the whole guess. If the
+# byte width, endianness, signedness or scale is wrong, the norm will not sit
+# at 1.0 and `norm` in every logged record says so immediately. The component
+# ORDER is the one error the norm cannot catch (permuting components
+# preserves the norm), which is why the raw bytes are logged too — see
+# OrientationEvent.raw_hex.
+#
+# _parse_state got this wrong once already by shipping a guessed byte layout
+# with no way to check it after the fact (see record_training.py's ble_meta
+# note and README's second caveat). This is the same class of guess, so it
+# carries its own evidence this time.
+QUAT_SCALE = 16384.0                 # int16 fixed-point: 2^14
+QUAT_ORDER = ("x", "y", "z", "w")    # component order within the payload
+
 # Message types in TX notifications
 MSG_ROTATION    = 0x01
 MSG_STATE       = 0x02
@@ -131,6 +158,34 @@ class MoveEvent:
     notation:   str    # standard notation e.g. "R", "R'", "U2" (2 not yet detected)
     timestamp:  float  # time.time()
     raw_byte:   int    # raw FaceRotation byte from protocol
+
+    def to_dict(self):
+        return asdict(self)
+
+
+@dataclass
+class OrientationEvent:
+    """
+    One MsgOrientation sample: the cube's own IMU quaternion, ~15/sec.
+
+    This is the ONLY direct measurement of whole-cube orientation available
+    anywhere in this pipeline. The cube does not report x/y/z rotations as
+    move events, so without this stream a rotation is invisible to ground
+    truth — it silently relabels every subsequent move and shows up only as
+    one long unbroken run of "classifier errors".
+
+    `raw_hex` is deliberately carried on every event rather than dropped
+    after parsing. The component order in QUAT_ORDER is a guess that the
+    unit-norm check cannot falsify, so the bytes have to survive into the log
+    for the order to be recoverable offline from a recorded session.
+    """
+    qw: float
+    qx: float
+    qy: float
+    qz: float
+    timestamp: float
+    norm: float        # |q|; ~1.0 iff the width/endianness/scale guess holds
+    raw_hex: str       # the undecoded payload, for offline layout repair
 
     def to_dict(self):
         return asdict(self)
@@ -228,6 +283,35 @@ def _parse_rotation(payload: bytearray) -> list[MoveEvent]:
     return events
 
 
+def _parse_orientation(payload: bytearray) -> Optional[OrientationEvent]:
+    """
+    Parse MsgOrientation payload into a quaternion.
+
+    Returns None only when there are too few bytes to hold four int16 — a
+    payload that parses to a non-unit quaternion is still RETURNED, with its
+    norm recorded, rather than rejected. Silently dropping those would hide
+    exactly the evidence needed to fix the layout (see QUAT_ORDER), and would
+    make a wrong guess look like "the cube sent nothing".
+    """
+    if len(payload) < 8:
+        return None
+
+    vals = [int.from_bytes(payload[i:i + 2], "big", signed=True) / QUAT_SCALE
+            for i in range(0, 8, 2)]
+    q = dict(zip(QUAT_ORDER, vals))
+    norm = sum(v * v for v in vals) ** 0.5
+
+    return OrientationEvent(
+        qw        = q["w"],
+        qx        = q["x"],
+        qy        = q["y"],
+        qz        = q["z"],
+        timestamp = time.time(),
+        norm      = norm,
+        raw_hex   = bytes(payload).hex(),
+    )
+
+
 def _parse_state(payload: bytearray) -> Optional[CubeState]:
     """
     Parse MsgState payload (60 bytes).
@@ -271,9 +355,27 @@ class CubeConnection:
                 print(move.notation)
     """
 
-    def __init__(self, address: str = None, timeout: float = 10.0):
+    def __init__(self, address: str = None, timeout: float = 10.0,
+                 orientation: bool = False, on_orientation=None):
+        """
+        `orientation` turns the cube's ~15/sec IMU quaternion stream ON. It
+        defaults to False so that every existing caller — verify_solve.py,
+        ble_truth.py, the live paths — keeps byte-identical behaviour and
+        packet load. Only recording paths that actually want rotation ground
+        truth should ask for it (record_training.py does).
+
+        `on_orientation` is a plain callback, NOT a queue, and that is
+        deliberate. The natural consumer shape here is
+        `async for move in cube.moves()`, which blocks on the move queue —
+        so a second queue would never be drained and would grow at 15
+        entries/sec for the length of the solve. A callback fires on the
+        loop thread and keeps no backlog; with no callback set the events
+        are simply dropped.
+        """
         self.address    = address
         self.timeout    = timeout
+        self.orientation = orientation
+        self.on_orientation = on_orientation
         self._client    = None
         self._move_queue: asyncio.Queue = asyncio.Queue()
         self._state_future: Optional[asyncio.Future] = None
@@ -306,10 +408,18 @@ class CubeConnection:
         # Subscribe to TX notifications
         await self._client.start_notify(TX_CHARACTERISTIC, self._on_notification)
 
-        # Disable orientation spam (15/sec quaternion messages we don't need)
-        await self._client.write_gatt_char(RX_CHARACTERISTIC,
-                                           CMD_DISABLE_ORIENTATION,
-                                           response=False)
+        # The orientation stream is ~15 messages/sec on the same
+        # characteristic the move events arrive on. Moves already share a
+        # 30ms notification tick (10.1% of them collide on it and become
+        # unmatchable to a distinct frame), so ENABLING this measurably
+        # raises traffic on the path that timing accuracy depends on. That
+        # is the cost being paid for rotation ground truth, and it is why
+        # this is opt-in per connection rather than on by default.
+        await self._client.write_gatt_char(
+            RX_CHARACTERISTIC,
+            CMD_ENABLE_ORIENTATION if self.orientation
+            else CMD_DISABLE_ORIENTATION,
+            response=False)
 
         return self
 
@@ -352,6 +462,18 @@ class CubeConnection:
                     self._move_queue.put_nowait(move)
 
             self._schedule_on_loop(enqueue_moves)
+
+        elif msg_type == MSG_ORIENTATION:
+            if self.on_orientation is None:
+                return                      # stream not wanted; drop, no backlog
+            event = _parse_orientation(payload)
+            if event is None:
+                return
+
+            def deliver_orientation():
+                self.on_orientation(event)
+
+            self._schedule_on_loop(deliver_orientation)
 
         elif msg_type == MSG_STATE:
             state = _parse_state(payload)

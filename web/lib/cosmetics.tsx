@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import type { WreathTier } from "@/components/LaurelWreath";
-import { you } from "@/lib/mockData";
+import { getMe } from "@/lib/account";
 
 const STORAGE_KEY = "cubearena-wreath";
 
@@ -11,40 +11,64 @@ export const RANKED_TIERS = ["gold", "silver", "bronze"] as const satisfies Wrea
 
 const ALL_TIERS = [...RANKED_TIERS, "founder"] as const satisfies WreathTier[];
 
-/**
- * The stored tier is checked against what the account has actually earned, not
- * just against the set of valid tier names. Without this, editing localStorage
- * equips anything — which for the ranked tiers is only vanity, but would hand
- * anyone the secret founder's olive and then name it back to them in the
- * "Remove ..." control. Client-side this is still only a speed bump; the real
- * guarantee has to come from the server that owns `isFounder`.
- */
-function isEarned(tier: WreathTier) {
-  return earnedWreaths(you.bestRank, you.isFounder).includes(tier);
-}
-
 type CosmeticsContextValue = {
   equippedWreath: WreathTier | null;
   setEquippedWreath: (tier: WreathTier | null) => void;
+  /** What this account may wear, per the SERVER. Empty until /api/me/ answers. */
+  earned: WreathTier[];
 };
 
 const CosmeticsContext = createContext<CosmeticsContextValue | null>(null);
 
+/**
+ * What is equipped is a local preference; what is EARNED comes from the
+ * server.
+ *
+ * That split is the whole design. `best_rank` and `is_founder` used to be
+ * literals in mock data, which meant the secret founder's olive was mintable
+ * by anyone who edited a JS bundle — the previous version of this file said
+ * so in a comment and could not do anything about it. Now the entitlement
+ * arrives from `/api/me/`, and localStorage only ever chooses among the tiers
+ * the server already granted.
+ *
+ * This is still a client-side check and still only a speed bump. It stops
+ * being one when a wreath is rendered on someone ELSE'S screen — that comes
+ * from their profile's `best_rank`/`is_founder`, which the client never
+ * writes.
+ */
 export function CosmeticsProvider({ children }: { children: ReactNode }) {
   const [equippedWreath, setEquippedState] = useState<WreathTier | null>(null);
+  const [earned, setEarned] = useState<WreathTier[]>([]);
 
   useEffect(() => {
-    const stored = window.localStorage.getItem(STORAGE_KEY);
-    if (stored && (ALL_TIERS as string[]).includes(stored) && isEarned(stored as WreathTier)) {
-      setEquippedState(stored as WreathTier);
-    } else if (stored) {
-      // A tier this account has no claim to — drop it rather than wear it.
-      window.localStorage.removeItem(STORAGE_KEY);
-    }
+    let cancelled = false;
+    getMe()
+      .then((me) => {
+        if (cancelled) return;
+        const allowed = earnedWreaths(me.best_rank ?? Infinity, me.is_founder);
+        setEarned(allowed);
+
+        const stored = window.localStorage.getItem(STORAGE_KEY);
+        if (stored && allowed.includes(stored as WreathTier)) {
+          setEquippedState(stored as WreathTier);
+        } else if (stored) {
+          // A tier this account has no claim to — drop it rather than wear it.
+          window.localStorage.removeItem(STORAGE_KEY);
+          setEquippedState(null);
+        }
+      })
+      .catch(() => {
+        // Signed out, or the API is down. Wear nothing rather than trusting
+        // whatever localStorage happens to say.
+        if (!cancelled) setEarned([]);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const setEquippedWreath = (tier: WreathTier | null) => {
-    if (tier && !isEarned(tier)) return;
+    if (tier && !earned.includes(tier)) return;
     setEquippedState(tier);
     if (tier) {
       window.localStorage.setItem(STORAGE_KEY, tier);
@@ -54,7 +78,7 @@ export function CosmeticsProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <CosmeticsContext.Provider value={{ equippedWreath, setEquippedWreath }}>
+    <CosmeticsContext.Provider value={{ equippedWreath, setEquippedWreath, earned }}>
       {children}
     </CosmeticsContext.Provider>
   );

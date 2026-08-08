@@ -104,8 +104,91 @@
   .cta:hover { transform: translateY(-2px); box-shadow: 0 12px 50px rgba(255,255,255,.25); }
   .cta:focus-visible { outline: 2px solid #fff; outline-offset: 4px; }
 
+  /* ---- waitlist form ----
+     Replaces the mailto: CTA. A mailto is not a waitlist: it opens a mail
+     client the visitor may not have configured, loses everyone on mobile
+     webmail, and builds no list. This posts inline and never navigates —
+     the page is one continuous scroll journey and a form POST that unloaded
+     it would drop the visitor back at the top of a 3D scene. */
+  .waitlist {
+    pointer-events: auto;
+    margin: 40px auto 0;
+    width: min(90vw, 470px);
+  }
+  .waitlist-row {
+    display: flex;
+    gap: 8px;
+    padding: 6px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,.16);
+    background: rgba(255,255,255,.045);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    transition: border-color .4s, background .4s;
+  }
+  .waitlist-row:focus-within {
+    border-color: rgba(255,255,255,.42);
+    background: rgba(255,255,255,.07);
+  }
+  .waitlist input[type="email"] {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 12px 8px 12px 20px;
+    border: 0;
+    background: transparent;
+    color: #fff;
+    font-family: 'Geist', sans-serif;
+    font-size: 15px;
+    letter-spacing: 0.01em;
+  }
+  .waitlist input[type="email"]::placeholder { color: rgba(255,255,255,.38); }
+  .waitlist input[type="email"]:focus { outline: none; }
+  .waitlist button {
+    flex: 0 0 auto;
+    padding: 12px 26px;
+    border: 0;
+    border-radius: 999px;
+    background: #fff;
+    color: #000;
+    font-family: 'Geist', sans-serif;
+    font-size: 14.5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: transform .35s cubic-bezier(.2,.7,.2,1), opacity .3s;
+  }
+  .waitlist button:hover:not(:disabled) { transform: translateY(-1px); }
+  .waitlist button:disabled { opacity: .5; cursor: default; }
+  .waitlist button:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+  /* Honeypot: a real person never fills this, a naive bot fills everything.
+     Hidden from sighted users, from screen readers, and from autofill. */
+  .waitlist .hp {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0);
+    white-space: nowrap; border: 0;
+  }
+  .waitlist-note {
+    margin: 14px auto 0;
+    max-width: 40ch;
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: rgba(255,255,255,.4);
+    letter-spacing: 0.005em;
+    min-height: 2.6em;   /* reserve the space the status message will use,
+                            so a reply does not shift the finale's layout */
+  }
+  .waitlist-note.ok  { color: rgba(150,255,190,.82); }
+  .waitlist-note.err { color: rgba(255,150,160,.85); }
+  .waitlist.done .waitlist-row { display: none; }
+
   /* ---- demo film card ("Proof" section) ---- */
   .frame.video { top: 10vh; }
+  /* "It never loses the cube" is demonstrated ON the real cube, which roams
+     the whole frame underneath — so the copy has to sit right at the top and
+     stay out of its way. */
+  .frame.track { top: 7vh; }
+  .frame.track h2 { font-size: clamp(26px, 3.6vw, 44px); }
   .frame.video h2 { font-size: clamp(26px, 3.8vw, 46px); }
   .demo-card {
     pointer-events: auto;
@@ -190,7 +273,13 @@
     left: 0; top: 0;
     width: 0; height: 0;
     will-change: transform, width, height;
+    opacity: 0.8;
   }
+  /* A re-detection frame: the box has just been snapped back onto truth, so
+     it brightens for the beat before the tracker takes over again. `detect`
+     is true for only ~3 frames in 12, so this reads as a pulse, not a
+     flicker — and the pulse IS the story the section is telling. */
+  #hudBox.lock { opacity: 1; color: #8affc4; }
   #hudBox i {
     position: absolute;
     width: 15px; height: 15px;
@@ -287,23 +376,33 @@
            closes for good before the demo card. Figma sections still carrying
            template placeholder text (its second card pair, and the three
            customer quotes under "Don't trust us") are left out. -->
-      <section class="frame low"  data-c="0.105"><h2>Every solve confirmed instantly.</h2></section>
-      <section class="frame high" data-c="0.225">
+      <section class="frame low"  data-c="0.095"><h2>Every solve confirmed instantly.</h2></section>
+      <section class="frame high" data-c="0.195">
         <p class="eyebrow">Step one</p>
         <h2>Verify the scramble.</h2>
         <p class="sub">Before the solve, scan your cube &mdash; so every race starts from a fair position.</p>
       </section>
-      <section class="frame low"  data-c="0.335">
+      <section class="frame low"  data-c="0.290">
         <p class="eyebrow">Step two</p>
         <h2>Solve.</h2>
         <p class="sub">You know this one.</p>
       </section>
-      <section class="frame high" data-c="0.445">
+      <section class="frame high" data-c="0.385">
         <p class="eyebrow">Step three</p>
         <h2>Verify the solve.</h2>
         <p class="sub">Stop the timer and we check for cube swaps and confirm your solve instantly.</p>
       </section>
-      <section class="frame video" data-c="0.570" data-w="0.075">
+      <!-- No inset panel here on purpose: the demonstration happens on the
+           real cube behind this copy, which roams the frame while the HUD box
+           chases it (see TRACK_BAND / renderHud below). A mock cube in a
+           little card was showing the visitor a cartoon of the thing the page
+           was already capable of showing them directly. -->
+      <section class="frame track" data-c="0.500" data-w="0.050">
+        <p class="eyebrow">Under the hood</p>
+        <h2>It never loses the cube.</h2>
+        <p class="sub">A detector locks on, a tracker holds between detections &mdash; through fast hands, motion blur and the edge of frame.</p>
+      </section>
+      <section class="frame video" data-c="0.610" data-w="0.055">
         <p class="eyebrow">Proof</p>
         <h2>Don&rsquo;t trust us? You don&rsquo;t have to.</h2>
         <a class="demo-card" id="demo" href="#" target="_blank" rel="noopener" aria-label="Watch the demo film">
@@ -312,26 +411,47 @@
           <span class="demo-soon">Filming now &mdash; join the waitlist to see it first</span>
         </a>
       </section>
-      <section class="frame high" data-c="0.700">
+      <!-- These two frames are the PAID tier (LAUNCH_ROADMAP.md §1: free
+           verification, paid Coach). Labelling them as such on the landing
+           page rather than at the pricing page is deliberate — the waitlist
+           is being built on the free half, and a visitor who only learns
+           about the paywall after signing up is the kind of surprise that
+           costs the launch its goodwill. -->
+      <section class="frame high" data-c="0.720">
+        <p class="eyebrow">Coach &mdash; included in the beta</p>
         <h2>All the data you always needed.</h2>
         <p class="sub">Every move of every solve, recorded. Endless new data to streamline your improvement.</p>
       </section>
-      <section class="frame low"  data-c="0.800">
+      <section class="frame low"  data-c="0.810">
         <h2>Specialized metrics.</h2>
         <p class="sub">Average move speed, hesitation time, individual algorithm speeds &mdash; all previously untrackable. Watch yourself improve.</p>
       </section>
       <section class="frame finale" data-c="0.915" data-hold="1">
         <p class="eyebrow">CubeArena</p>
         <h1>The future of competitive speedcubing.</h1>
-        <a class="cta" href="mailto:aiden.m.lowery@gmail.com?subject=CubeArena%20early%20access&amp;body=Count%20me%20in%20for%20early%20access.">Request early access</a>
+        <form class="waitlist" id="waitlist" novalidate>
+          <div class="waitlist-row">
+            <label class="hp" for="wl-company">Company</label>
+            <input class="hp" id="wl-company" name="company" type="text"
+                   tabindex="-1" autocomplete="off" aria-hidden="true">
+            <label class="hp" for="wl-email">Email address</label>
+            <input id="wl-email" name="email" type="email" required
+                   autocomplete="email" inputmode="email"
+                   placeholder="you@example.com">
+            <button type="submit" id="wl-submit">Join the waitlist</button>
+          </div>
+          <p class="waitlist-note" id="wl-note" role="status" aria-live="polite">
+            Verification is free, forever. No spam &mdash; one email when it opens.
+          </p>
+        </form>
       </section>
     </div>
     <div id="hud" aria-hidden="true">
       <div id="hudBox"><i></i><i></i><i></i><i></i><b id="hudTag">cube 0.94</b></div>
       <dl id="hudReads">
+        <dt>source</dt><dd>webcam &middot; 30 fps</dd>
+        <dt>detector</dt><dd id="hudMode">detect</dd>
         <dt>motion</dt><dd>chroma &middot; 3ch</dd>
-        <dt>onset</dt><dd>delta &gt; 8.0</dd>
-        <dt>window</dt><dd>5 frames</dd>
         <dt>energy</dt><dd id="hudState">0.00</dd>
       </dl>
     </div>
@@ -340,6 +460,69 @@
 </div>
 
 <script>
+/* ---- waitlist ------------------------------------------------------------
+   Deliberately its own IIFE, ABOVE the scene code, because the scene bails
+   out with `return` when WebGL2 is missing (.nogl fallback). Signing up must
+   keep working on a machine that cannot render the journey — that visitor
+   still sees every frame, statically, including this form. */
+(() => {
+  'use strict';
+  const form = document.getElementById('waitlist');
+  if (!form) return;
+  const note = document.getElementById('wl-note');
+  const btn = document.getElementById('wl-submit');
+  const email = document.getElementById('wl-email');
+  const ENDPOINT = '/api/waitlist';
+
+  const say = (msg, cls) => {
+    note.textContent = msg;
+    note.className = 'waitlist-note' + (cls ? ' ' + cls : '');
+  };
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const value = email.value.trim();
+    /* Intentionally permissive. Client-side email regexes reject valid
+       addresses far more often than they catch typos, and the address is
+       validated server-side anyway; this only catches the obvious slip. */
+    if (!value || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+      say('That does not look like an email address.', 'err');
+      email.focus();
+      return;
+    }
+    btn.disabled = true;
+    say('Adding you…');
+    try {
+      const res = await fetch(ENDPOINT, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          email: value,
+          company: form.company.value,        // honeypot
+          ref: document.referrer || null,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        form.classList.add('done');
+        say(data.duplicate
+          ? 'You are already on the list — we will be in touch.'
+          : 'You are on the list. We will email you when it opens.', 'ok');
+      } else {
+        btn.disabled = false;
+        say(data.error || 'Something went wrong. Try again in a moment.', 'err');
+      }
+    } catch {
+      btn.disabled = false;
+      /* Network failure, offline, or the API route not deployed. Give the
+         mail fallback rather than a dead end — this is the one case where a
+         mailto genuinely helps, because nothing else is reachable. */
+      say('Could not reach the server. Email aiden.m.lowery@gmail.com and ' +
+          'we will add you by hand.', 'err');
+    }
+  });
+})();
+
 (() => {
 'use strict';
 
@@ -371,6 +554,46 @@ const DEMO_VIDEO_URL = '';
 const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, powerPreference: 'high-performance' });
 if (!gl) { document.documentElement.classList.add('nogl'); return; }
 const hasFloat = !!gl.getExtension('EXT_color_buffer_float');
+
+/* ---- context loss ----------------------------------------------------
+   The context can die at ANY time, not just at startup: the browser caps
+   live WebGL contexts (16 per tab in Chrome) and force-loses the oldest
+   when something else allocates past the cap. Without this the render loop
+   would keep issuing GL calls into a dead context forever and the cube
+   would simply freeze mid-scroll with no explanation.
+
+   `.nogl` is a real fallback — it unpins the stage and stacks the frames
+   into a readable static page — so reaching it is a graceful outcome, and
+   it is the same one used when WebGL2 is missing entirely. On restore the
+   page reloads once: every GL object (programs, VAOs, framebuffers) is
+   invalid after a loss, and rebuilding that pipeline in place is far more
+   failure-prone than starting clean. */
+let glDead = false;
+canvas.addEventListener('webglcontextlost', e => {
+  e.preventDefault();          /* required, or restore is never attempted */
+  glDead = true;
+  document.documentElement.classList.add('nogl');
+  /* Adding the class is NOT enough on its own. `.nogl .frame` sets opacity
+     and visibility, but renderFrames() has by now written those same
+     properties INLINE on each frame to run the scroll choreography, and an
+     inline style beats a class rule — so the fallback would arrive with
+     every section still hidden and the page would go blank. This does not
+     arise when WebGL is missing at load, because renderFrames never ran;
+     it only bites on a loss mid-session, which is exactly the case this
+     handler exists for. Queried from the DOM rather than the `frames`
+     closure so it is safe even if the loss lands during setup. */
+  document.querySelectorAll('#frames .frame').forEach(el => {
+    el.style.opacity = '';
+    el.style.visibility = '';
+    el.style.transform = '';
+  });
+}, false);
+let glReloaded = false;
+canvas.addEventListener('webglcontextrestored', () => {
+  if (glReloaded) return;      /* bounded: never a reload loop */
+  glReloaded = true;
+  location.reload();
+}, false);
 
 /* ================= shaders ================= */
 
@@ -686,10 +909,22 @@ void main(){
 
 function makeProg(vs, fs) {
   const compile = (type, src) => {
+    /* A LOST CONTEXT IS INDISTINGUISHABLE FROM A BROKEN SHADER unless you
+       ask. On a lost context getShaderParameter(COMPILE_STATUS) returns
+       null — falsy, so it reads as "did not compile" — and
+       getShaderInfoLog returns null too, so the thrown error carries no
+       message at all. Chrome caps live WebGL contexts at 16 per tab and
+       force-loses the OLDEST on the 17th, so a long-lived page like this
+       one is exactly the victim. Ask first, and say which it was. */
+    if (gl.isContextLost()) throw new Error('WebGL context lost before compile');
     const s = gl.createShader(type);
+    if (!s) throw new Error('WebGL context lost (createShader returned null)');
     gl.shaderSource(s, src);
     gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      if (gl.isContextLost()) throw new Error('WebGL context lost during compile');
+      throw new Error(gl.getShaderInfoLog(s) || 'shader compile failed (no driver log)');
+    }
     return s;
   };
   const p = gl.createProgram();
@@ -898,10 +1133,15 @@ const KEYS = [
   [0.300, 14, 290, 1.00,  -8],   /* step two — "Solve." (R then U) */
   [0.375, 14, 290, 1.00,  -8],
   [0.410, 22, 372, 0.92,  15],   /* step three — "Verify the solve." */
-  [0.480, 22, 380, 0.92,  15],
-  [0.510, 18, 452, 0.50,  30],   /* demo film — cube small and low, beneath the card */
-  [0.640, 18, 460, 0.50,  30],
-  [0.670, 24, 536, 0.90,  15],   /* "All the data you always needed." */
+  [0.430, 22, 378, 0.92,  15],
+  /* "It never loses the cube": pulled smaller and just below centre, because
+     this is the one section where the cube LEAVES the middle of the frame —
+     the roam below needs room on all four sides to run without clipping. */
+  [0.468, 16, 416, 0.62,   9],
+  [0.545, 16, 448, 0.62,   9],
+  [0.585, 18, 470, 0.50,  30],   /* demo film — cube small and low, beneath the card */
+  [0.655, 18, 478, 0.50,  30],
+  [0.690, 24, 536, 0.90,  15],   /* "All the data you always needed." */
   [0.740, 24, 536, 0.90,  15],
   [0.775, 10, 620, 0.97, -10],   /* "Specialized metrics." */
   [0.845, 10, 620, 0.97, -10],
@@ -919,8 +1159,21 @@ const easeIO = t => t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2;
    dropping back into the motion view later in the scroll read as a relapse
    rather than a beat. [enter, full-from, full-to, exit, amount] */
 const SCAN_BANDS = [
-  [0.170, 0.212, 0.460, 0.490, 1.00],
+  [0.170, 0.212, 0.430, 0.452, 1.00],
 ];
+
+/* The tracking section's own window. Opens only after the chroma band above
+   has fully closed (0.452): a motion-filtered cube and a detector chasing a
+   roaming cube are two different demonstrations, and overlapping them makes
+   both illegible. [enter, full-from, full-to, exit] */
+const TRACK_BAND = [0.455, 0.478, 0.528, 0.552];
+function trackAmount(p) {
+  const [i0, i1, o1, o0] = TRACK_BAND;
+  if (p <= i0 || p >= o0) return 0;
+  return smooth(clamp(p < i1 ? (p - i0) / (i1 - i0)
+                    : p > o1 ? (o0 - p) / (o0 - o1)
+                    : 1, 0, 1));
+}
 /* Returns [strength, ramp]: `strength` grades the render, `ramp` is the band's
    own 0..1 progress, so the facelet counter fills to 54 on every band rather
    than stalling at whatever that band's strength happens to be. */
@@ -1033,23 +1286,45 @@ const hud = document.getElementById('hud');
 const hudBox = document.getElementById('hudBox');
 const hudTag = document.getElementById('hudTag');
 const hudState = document.getElementById('hudState');
+const hudMode = document.getElementById('hudMode');
 const HB = SPACING + 0.5;   /* cube half-extent in group-local space */
-let hudShown = -1, hudGeom = '', hudTxt = '';
+let hudShown = -1, hudScanVar = -1, hudGeom = '', hudTxt = '', hudLock = null;
+
+/* What the box BELIEVES, which is not the same as where the cube is.
+   cf. cv/detection/cube_detector.py: YOLO runs every YOLO_INTERVAL frames and
+   a CSRT tracker bridges the gap, so the box SNAPS onto truth on a detect
+   frame and GLIDES — imperfectly, and worse the faster the cube moves — in
+   between. That lag is the whole point of the "It never loses the cube"
+   section: it is why re-detection has to exist at all.
+
+   In the near-static sections this model is invisible (est converges onto a
+   stationary truth within a frame or two), so it costs nothing there. */
+const DETECT_EVERY = 12;    /* cf. cube_detector.YOLO_INTERVAL */
+const est = { x0: 0, y0: 0, x1: 0, y1: 0, conf: 0.94, live: false };
+let hudFrame = 0;
 
 /**
- * `PVG` already carries the group rotation and scale, so projecting the eight
- * local corners and taking their screen-space extent gives the same axis-
- * aligned box a real detector would return.
+ * `PVG` already carries the group rotation, translation and scale, so
+ * projecting the eight local corners and taking their screen-space extent
+ * gives the same axis-aligned box a real detector would return.
+ *
+ * `on` is the HUD's own visibility (open over BOTH the verification band and
+ * the tracking band); `scan` stays tied to the chroma filter alone, because
+ * it also drives the headline colour crossover.
  */
-function renderHud(scan, ramp, PVG, t) {
-  const on = Math.round(clamp(scan, 0, 1) * 100) / 100;
-  if (on !== hudShown) {
-    hud.style.opacity = on;
-    hud.style.visibility = on === 0 ? 'hidden' : 'visible';
-    framesEl.style.setProperty('--scan', on);   /* headline colour crossover */
-    hudShown = on;
+function renderHud(on, scan, ramp, PVG, t, dash, trk) {
+  const o = Math.round(clamp(on, 0, 1) * 100) / 100;
+  if (o !== hudShown) {
+    hud.style.opacity = o;
+    hud.style.visibility = o === 0 ? 'hidden' : 'visible';
+    hudShown = o;
   }
-  if (on === 0) return;
+  const sv = Math.round(clamp(scan, 0, 1) * 100) / 100;
+  if (sv !== hudScanVar) {
+    framesEl.style.setProperty('--scan', sv);   /* headline colour crossover */
+    hudScanVar = sv;
+  }
+  if (o === 0) { est.live = false; return; }
 
   let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
   for (let i = 0; i < 8; i++) {
@@ -1061,10 +1336,37 @@ function renderHud(scan, ramp, PVG, t) {
     if (sx > x1) x1 = sx;
     if (sy > y1) y1 = sy;
   }
-  /* snap to 2px: a tracked box quantises, it doesn't glide */
   const pad = 14;
-  const q = v => Math.round((v) * 0.5) * 2;
-  const geom = `${q(x0 - pad)},${q(y0 - pad)},${q(x1 - x0 + pad * 2)},${q(y1 - y0 + pad * 2)}`;
+  x0 -= pad; y0 -= pad; x1 += pad; y1 += pad;
+
+  const detecting = hudFrame % DETECT_EVERY === 0;
+  hudFrame++;
+
+  /* The detect/track PULSE is shown only in the tracking section. Everywhere
+     else the cube is near enough still that the distinction is invisible
+     anyway, and a box blinking green every 200ms for the whole verification
+     stretch is just noise over copy that is about something else. */
+  const pulsing = trk > 0.3;
+  /* the snap lasts one frame; the readout holds it long enough to read */
+  const showLock = pulsing && hudFrame % DETECT_EVERY < 3;
+
+  if (!est.live) {                      /* first frame after the HUD opens */
+    est.x0 = x0; est.y0 = y0; est.x1 = x1; est.y1 = y1;
+    est.live = true;
+  }
+  if (detecting) {
+    est.x0 = x0; est.y0 = y0; est.x1 = x1; est.y1 = y1;
+    est.conf = reduced ? 0.94 : 0.90 + 0.09 * Math.abs(Math.sin(t * 3.3));
+  } else {
+    const k = 0.30 - 0.16 * dash;
+    est.x0 += (x0 - est.x0) * k; est.y0 += (y0 - est.y0) * k;
+    est.x1 += (x1 - est.x1) * k; est.y1 += (y1 - est.y1) * k;
+    est.conf = Math.max(0.62, est.conf - 0.004 - 0.02 * dash);
+  }
+
+  /* snap to 2px: a tracked box quantises, it doesn't glide */
+  const q = v => Math.round(v * 0.5) * 2;
+  const geom = `${q(est.x0)},${q(est.y0)},${q(est.x1 - est.x0)},${q(est.y1 - est.y0)}`;
   if (geom !== hudGeom) {
     const [gx, gy, gw, gh] = geom.split(',');
     hudBox.style.transform = `translate(${gx}px, ${gy}px)`;
@@ -1073,9 +1375,15 @@ function renderHud(scan, ramp, PVG, t) {
     hudGeom = geom;
   }
 
-  /* confidence wobbles like a live score; energy is the band's own ramp */
-  const conf = reduced ? 0.94 : 0.93 + Math.sin(t * 1.3) * 0.035;
-  const txt = conf.toFixed(2) + '|' + Math.min(1, ramp / 0.9).toFixed(2);
+  const mode = !pulsing ? 'locked' : showLock ? 'detect' : 'track';
+  if (mode !== hudLock) {
+    hudBox.classList.toggle('lock', showLock);
+    hudMode.textContent = mode;
+    hudLock = mode;
+  }
+
+  /* energy is the chroma band's own ramp; the score is the detector's */
+  const txt = est.conf.toFixed(2) + '|' + Math.min(1, ramp / 0.9).toFixed(2);
   if (txt !== hudTxt) {
     const [c, e] = txt.split('|');
     hudTag.textContent = 'cube ' + c;
@@ -1086,6 +1394,11 @@ function renderHud(scan, ramp, PVG, t) {
 
 let lastNow = 0, wasScanning = false;
 function tick(now) {
+  /* Stop rescheduling the instant the context dies, rather than issuing a
+     frame's worth of GL calls into a dead context on every vsync for the
+     rest of the page's life. Returning without requestAnimationFrame is
+     what ends the loop — see the webglcontextlost handler above. */
+  if (glDead || gl.isContextLost()) return;
   const dt = clamp((now - lastNow) / 1000, 0.001, 0.033);
   lastNow = now;
 
@@ -1112,21 +1425,43 @@ function tick(now) {
   const aYaw   = reduced ? 0 : Math.sin(t * 0.33 + 1.7) * 1.5 * wob;
   const bob    = reduced ? 0 : Math.sin(t * 0.62) * 0.055;
 
+  /* ---- "It never loses the cube": the cube roams the frame ----
+     Two out-of-phase sines plus a periodic dash, so it spends most of its
+     time drifting plausibly and occasionally moves fast enough that a tracker
+     would struggle — which is the interesting case, and the one the copy is
+     about. Amplitudes are fractions of the viewport and are tuned against the
+     0.62 keyframe scale so the cube grazes the edges without ever leaving.
+     Scaled by the band so it eases from and back to dead centre. */
+  const trk = reduced ? 0 : trackAmount(cur);
+  let dash = 0, roamX = 0, roamY = 0;
+  if (trk > 0) {
+    const tt = t * 0.9;
+    dash = Math.pow(Math.sin(tt * 0.21), 24);           /* brief speed bursts */
+    roamX = trk * (Math.sin(tt * 0.55) * 0.220
+                 + Math.sin(tt * 1.31 + 1) * 0.075
+                 + Math.sin(tt * 2.70) * 0.060 * dash);
+    roamY = trk * (Math.cos(tt * 0.43) * 0.130
+                 + Math.cos(tt * 1.07 + 2) * 0.045
+                 + Math.cos(tt * 2.30) * 0.035 * dash);
+  }
+
   /* world placement: cube optical centre sits at 45vh + keyframe offset */
   const worldH = 2 * dist * Math.tan(FOV/2);
-  const tyW = (0.5 - 0.45) * worldH - (tyv / 100) * worldH + bob;
+  const worldW = worldH * (W / H);
+  const txW = roamX * worldW;
+  const tyW = (0.5 - 0.45) * worldH - (tyv / 100) * worldH + bob + roamY * worldH;
 
   const proj = persp(FOV, W / H, dist - 6, dist + 6);
   const view = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,-dist,1]);
   const PV = mul4(proj, view);
 
-  /* group = T(0,tyW,0) · Rx · Ry · S */
+  /* group = T(txW,tyW,0) · Rx · Ry · S */
   const Rg = mul3(rot3(0, pitch + aPitch), rot3(1, yaw + aYaw));
   const group = new Float32Array([
     Rg[0]*scl, Rg[1]*scl, Rg[2]*scl, 0,
     Rg[3]*scl, Rg[4]*scl, Rg[5]*scl, 0,
     Rg[6]*scl, Rg[7]*scl, Rg[8]*scl, 0,
-    0, tyW, 0, 1,
+    txW, tyW, 0, 1,
   ]);
 
   /* eye position in world = (0,0,dist) */
@@ -1168,13 +1503,16 @@ function tick(now) {
     return [cpos[0]/cpos[3]*0.5 + 0.5, cpos[1]/cpos[3]*0.5 + 0.5];
   };
   const cubeHalf = 1.56 * scl;
-  const bottom = projP([0, tyW - cubeHalf, 0]);
+  /* x is taken from the projection too, not pinned to 0.5 — while the cube
+     roams, a pool of light and a contact shadow left behind in the middle of
+     the screen is the tell that the cube is a sprite rather than an object. */
+  const bottom = projP([txW, tyW - cubeHalf, 0]);
   const shadY = bottom[1] - 0.10;
   gl.useProgram(progBack.p);
   gl.bindVertexArray(quadVAO);
   gl.uniform2f(progBack.u.uRes, W, H);
-  gl.uniform2f(progBack.u.uPool, 0.5, clamp(bottom[1] - 0.16, 0, 1));
-  gl.uniform2f(progBack.u.uShad, 0.5, clamp(shadY, 0, 1));
+  gl.uniform2f(progBack.u.uPool, clamp(bottom[0], 0, 1), clamp(bottom[1] - 0.16, 0, 1));
+  gl.uniform2f(progBack.u.uShad, clamp(bottom[0], 0, 1), clamp(shadY, 0, 1));
   gl.uniform2f(progBack.u.uShadR, cubeHalf / worldH * (H / W) * 1.5, cubeHalf / worldH * 0.42);
   gl.uniform1f(progBack.u.uShadA, 0.74);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -1280,7 +1618,9 @@ function tick(now) {
 
   /* ---- DOM ---- */
   renderFrames(cur);
-  renderHud(scan, scanRamp, mul4(PV, group), t);
+  /* the HUD is open over the verification band AND the tracking band; `scan`
+     stays separate because it also grades the render and the headline colour */
+  renderHud(Math.max(scan, trk), scan, scanRamp, mul4(PV, group), t, dash, trk);
   hint.style.opacity = clamp(1 - cur / 0.04, 0, 1).toFixed(2);
 
   requestAnimationFrame(tick);

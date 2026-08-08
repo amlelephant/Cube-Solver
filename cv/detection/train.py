@@ -39,6 +39,33 @@ parser.add_argument("--no-copy", action="store_true",
                          "weights)")
 parser.add_argument("--cpu",    action="store_true",
                     help="Force CPU training even if a GPU is available")
+parser.add_argument("--lr0",    type=float, default=None,
+                    help="Fixed initial learning rate (default: ultralytics' "
+                         "auto-selected value). Set this explicitly and low "
+                         "(e.g. 0.0005) for a small, conservative fine-tune "
+                         "from an already-good checkpoint — the auto-picked "
+                         "rate is tuned for training from scratch and can "
+                         "overshoot in just a few epochs on a small dataset "
+                         "(2026-08-03: auto lr0=0.002 on a 1884-image "
+                         "fine-tune from detect_full_cube.pt regressed "
+                         "recall badly by epoch 1).")
+parser.add_argument("--freeze", type=int,   default=None,
+                    help="Freeze the first N backbone layers (default: none "
+                         "frozen). Keeps early general-purpose features "
+                         "fixed during a small fine-tune, reducing the risk "
+                         "of catastrophic forgetting.")
+parser.add_argument("--optimizer", type=str, default="auto",
+                    help="ultralytics optimizer name, e.g. SGD, AdamW, or "
+                         "auto (default: auto-selected, matches prior "
+                         "behavior)")
+parser.add_argument("--workers", type=int,   default=None,
+                    help="DataLoader worker processes (default: ultralytics' "
+                         "default, 8). Set to 0 to disable multiprocessing "
+                         "if training hits FileNotFoundError from a worker "
+                         "process (2026-08-03: hit this reproducibly on a "
+                         "hardlinked dataset — looked like AV/indexer lock "
+                         "contention on freshly-touched files racing 8 "
+                         "parallel workers, not present with workers=0).")
 args = parser.parse_args()
 
 # ── Imports ────────────────────────────────────────────────────────────────
@@ -108,7 +135,7 @@ if(__name__ == '__main__'):
 
     # ── Train ──────────────────────────────────────────────────────────────────
     print("Starting training...\n")
-    results = model.train(
+    train_kwargs = dict(
         data      = args.data,
         epochs    = args.epochs,
         imgsz     = args.imgsz,
@@ -119,10 +146,18 @@ if(__name__ == '__main__'):
         amp       = (device != "cpu"),  # mixed precision: GPU only
         plots     = True,        # saves results.png and val prediction images
         verbose   = True,
+        optimizer = args.optimizer,
         hsv_h     = 0.06,        # wider hue aug — indoor lighting shifts color
                                  # far beyond the 0.015 default (see 2026-07-15
                                  # night-lighting diagnosis)
     )
+    if args.lr0 is not None:
+        train_kwargs["lr0"] = args.lr0
+    if args.freeze is not None:
+        train_kwargs["freeze"] = args.freeze
+    if args.workers is not None:
+        train_kwargs["workers"] = args.workers
+    results = model.train(**train_kwargs)
 
     # ── Copy best weights to project root ─────────────────────────────────────
     # results.save_dir, not a hardcoded path: when runs/detect/cube_yolo already

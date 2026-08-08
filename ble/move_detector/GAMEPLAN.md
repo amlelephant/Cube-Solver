@@ -93,6 +93,125 @@ Three things follow, and the third changes how §1's table reads:
   take, `124134_solve`, already carries a 4.46% same-class floor (ceiling
   95.5%). Capture frame rate is worth costing before it binds.
 
+### 1c. Where the misses actually are (measured 2026-08-06)
+
+Misses are ~60% of the error mass, so "fix the miss channel" is the obvious
+next move. This section measures *which* fix, and rules out the one that
+looked most attractive.
+
+**Setup.** `move_ctc_spd_s0`, greedy decode, the 8 never-trained `*_solve`
+sessions, aligned to BLE truth with `decode.align_sequences`. 962 truth
+onsets.
+
+    ok 87.9%   miss 6.7%   sub 3.6%   phantom 1.8%
+
+**Half turns are not the mechanism, and R2-as-its-own-class is not the fix.**
+The hypothesis was that CTC's one structural miss — two same-class onsets
+within ~2 frames, unemittable without an intervening blank — is really
+half turns, since a half turn is exactly two identical quarter turns in a
+row. Three measurements kill it:
+
+* Half turns are **40% of all corpus moves** (1323 pairs / 6608 moves), so
+  the prevalence is certainly high enough to matter.
+* But the median gap *inside* a half turn is **0.330 s ≈ 10 frames**. Only
+  **2.0%** fall within the 2-frame collision window. The model sees almost
+  every half turn as two cleanly separated onsets and has no structural
+  trouble with it.
+* Among misses, half-turn onsets are enriched only mildly: 31.8% of misses
+  vs 22.9% of onsets, i.e. **5.9 excess misses out of 66, p = 0.105**
+  (exact two-sided binomial). That is **9% of the miss channel and 0.61
+  accuracy points**, and it is not significant.
+
+So the ceiling on this change is ~0.6 points, consistent with the 1.55%
+structural floor computed in §1. Against that: it needs 40% of the corpus
+relabelled, `n_classes` 13 → 19, changes to decode/reconstruct/verify_solve,
+a two-seed retrain — **and it silently breaks the anticheat count metric**,
+which is QTM and is calibrated on quarter turns (`MIN_OBSERVED_MOVES = 32`,
+validated at 36/36 and 21/21 on both seeds). Emitting R2 as one token drops
+every observed count by the number of half turns in the solve. Not worth it.
+If it is ever built anyway, the gate must count an R2 token as **2**.
+
+**What the misses actually track is the SESSION, not the move.**
+
+| session | hour | TPS | onsets | miss% |
+|---|---|---|---|---|
+| `20260731_211018` | 21 | 2.25 | 84 | **15.5** |
+| `20260803_095533` | 9 | 2.27 | 140 | **14.3** |
+| `20260731_213559` | 21 | 2.67 | 108 | 7.4 |
+| `20260729_221809` | 22 | 2.91 | 152 | 6.6 |
+| `20260730_113054` | 11 | 2.57 | 132 | 3.8 |
+| `20260730_111941` | 11 | 2.17 | 106 | 3.8 |
+| `20260724_100120` | 10 | 2.39 | 134 | 3.7 |
+| `20260723_105530` | 10 | 1.83 | 106 | **0.9** |
+
+A **16.4× spread**, CV 0.75. A per-move mechanism sitting at a roughly
+constant ~23% prevalence in every session *cannot* produce that. Evening
+averages 9.8% against daytime's 5.3%, so lighting is part of it — but the
+second-worst session is 09:33, so lighting is not all of it either, and
+TPS does not separate the two groups (2.27 scores 14.3%, 2.57 scores 3.8%).
+
+**This also closes the "wider parameters" question.** The same weights score
+98.1% on one held-out session and 71.4% on another. That is not a capacity
+limit; a model short on capacity is short everywhere. Consistent with every
+model-side intervention on record measuring flat (encoding rework, optical
+flow −, anchor selection −0.6, per-frame noise across sigmas).
+
+**Conclusion: the miss channel is a data-coverage problem at session
+granularity.** §5's recording plan is the lever.
+
+### 1d. The regime axis is NOT identified — and n=8 is why (2026-08-06)
+
+The obvious follow-up to §1c was to find what `20260803_095533` (09:33,
+14.3% miss) shares with the evening takes. **It was attempted and it
+failed.** Recording the failure because the next person will otherwise
+repeat it.
+
+Four candidate mechanisms were tested against the 66 held-out misses:
+
+| candidate | result |
+|---|---|
+| half turns | p = 0.105, ≤0.61 pts (§1c) |
+| onset crowding (frames to nearest neighbour) | median 3.0 missed vs 4.0 found, **p = 0.21** |
+| `diff_floor` (sensor quiet-frame noise) | r = −0.72, **perfect 4/4 split, no overlap** — but see below |
+| posterior separability | metric produced out-of-range values; **invalid, tested nothing** |
+
+`diff_floor` looked like the answer: the four worst sessions sit at
+1.18–1.55 and the four best at 4.20–5.84, a clean 2.7× gap with no overlap,
+r = −0.72 against miss rate versus +0.37 for hour-of-day, and only 11% of
+the training corpus (5/44) below 2.0. A textbook data hole.
+
+**It does not survive two checks.**
+
+* **The mechanism runs backwards.** The proposed story was that in-camera
+  temporal denoising suppresses the diff-luma channel the onset head reads.
+  But median onset confidence *at true onsets* is **higher** in the failing
+  sessions (0.729) than the passing ones (0.656). The model is more
+  confident where it misses more. Whatever is happening, it is not signal
+  suppression. (Capture fps is 30.0 in all eight, so it is not exposure
+  driven either.)
+* **It is a six-variable search over eight sessions.** A random variable
+  splits 4-worst from 4-best perfectly with probability 1/C(8,4) = 1.4%;
+  across six variables that is ~8%. A perfect split at this n is not
+  evidence, and `luma_std` (+1.37 SD) and `gb` (−1.14 SD) separated nearly
+  as well with no story at all.
+
+**So the honest state is: the 16× session spread is a solid direct
+observation, and nothing tested explains it.**
+
+**What that implies is a change of target.** At eight held-out sessions,
+analysis cannot distinguish a real regime axis from a lucky one — more
+variables will keep producing spurious separations, which is exactly what
+happened here and what [[optical-flow-rejected]] and
+[[crowding-no-longer-error-source]] each cost before. **The binding
+constraint is the number of held-out sessions, not the number of
+hypotheses.** §5's recording plan is therefore right for a sharper reason
+than "cover the evening": it is the only thing that makes any regime
+question answerable at all. Record first, attribute after — and keep
+`diff_floor` on the list of things to re-test once n is large enough to
+carry a correction for multiple comparisons.
+
+---
+
 ## 2. Ship threshold — the recommendation
 
 **Adopt 97% as the daytime target, but do not make it the ship blocker.

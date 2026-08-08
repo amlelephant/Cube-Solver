@@ -276,7 +276,8 @@ def train(args):
 
     torch.manual_seed(args.seed)
 
-    streams = load_joint_streams(session_dirs, sigma=args.sigma,
+    streams = load_joint_streams(session_dirs, mmap=args.workers > 0,
+                                 sigma=args.sigma,
                                  count_radius=args.count_radius)
     if not streams:
         sys.exit("No prepared colour sessions. Run "
@@ -293,7 +294,8 @@ def train(args):
     train_ds = JointClipDataset(train_s, clip_len=args.clip_len,
                                 stride=args.stride, augment=True,
                                 seed=args.seed,
-                                aug_strength=args.aug_strength)
+                                aug_strength=args.aug_strength,
+                                speed_aug=args.speed_aug)
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
                               num_workers=args.workers, drop_last=True,
                               worker_init_fn=seed_worker if args.workers else None,
@@ -536,6 +538,13 @@ if __name__ == "__main__":
                    help="Scales every photometric augmentation toward "
                         "identity (dataset.AUG_*); 1.0 = the widened "
                         "ranges added 2026-07-31, 0 = geometry only")
+    p.add_argument("--speed-aug", type=float, default=0.0,
+                   help="P(a clip is time-warped to look like a faster "
+                        "solve). CAPPED at dataset.MAX_DENSE_SPEED here, "
+                        "unlike train_ctc.py: the dense sigma=1 targets "
+                        "cannot represent two onsets closer than a few "
+                        "frames, so an uncapped warp would merge two peaks "
+                        "into one and train the model to UNDER-count.")
     p.add_argument("--threshold", type=float, default=THRESHOLD)
     p.add_argument("--beta", type=float, default=BETA)
     p.add_argument("--min-sep", type=int, default=MIN_SEP)

@@ -36,13 +36,48 @@ _preview_queue = queue.Queue(maxsize=4)
 async def _ble_session(args, session_dir: Path, tracker: OrientationTracker,
                        error_bucket: list):
     moves_path = session_dir / "moves.jsonl"
+    orient_path = session_dir / "orientation.jsonl"
     move_count = 0
     start_str  = None
     end_str    = None
     battery    = None
 
+    # --- IMU quaternion log ------------------------------------------------
+    # Written from a callback on the BLE loop thread, NOT drained by the move
+    # loop below (which blocks on `async for`). Kept in a separate file from
+    # moves.jsonl because it is a different KIND of record: moves are discrete
+    # events, this is a ~15Hz continuous signal, and prepare_data.py aligns
+    # the two by wall clock exactly as it already aligns moves to frames.
+    orient_file = None
+    orient_stats = {"n": 0, "norm_sum": 0.0,
+                    "norm_min": None, "norm_max": None}
+
+    def _log_orientation(ev):
+        if orient_file is None:
+            return
+        orient_file.write(json.dumps({
+            "timestamp": ev.timestamp,
+            "qw": ev.qw, "qx": ev.qx, "qy": ev.qy, "qz": ev.qz,
+            "norm": ev.norm,
+            "raw_hex": ev.raw_hex,
+        }) + "\n")
+        orient_stats["n"] += 1
+        orient_stats["norm_sum"] += ev.norm
+        if orient_stats["norm_min"] is None or ev.norm < orient_stats["norm_min"]:
+            orient_stats["norm_min"] = ev.norm
+        if orient_stats["norm_max"] is None or ev.norm > orient_stats["norm_max"]:
+            orient_stats["norm_max"] = ev.norm
+
+    want_orientation = not args.no_orientation
+    if want_orientation:
+        orient_file = open(orient_path, "w")
+
     try:
-        async with CubeConnection(address=args.address) as cube:
+        async with CubeConnection(
+                address=args.address,
+                orientation=want_orientation,
+                on_orientation=_log_orientation if want_orientation else None,
+        ) as cube:
             battery = await cube.get_battery()
             if battery is not None:
                 print(f"  Battery: {battery}%")
@@ -89,6 +124,9 @@ async def _ble_session(args, session_dir: Path, tracker: OrientationTracker,
         error_bucket.append(e)
     finally:
         _stop_event.set()
+        if orient_file is not None:
+            orient_file.flush()
+            orient_file.close()
         # The cube's own state report is NOT ground truth and must not be
         # recorded under a name that reads like it is.
         #
@@ -117,7 +155,44 @@ async def _ble_session(args, session_dir: Path, tracker: OrientationTracker,
                     "it to a solved cube and asserts it returns there."),
                 "battery":     battery,
                 "move_count":  move_count,
+                # --- IMU stream health -------------------------------------
+                # `quaternion_norm_*` is the acceptance test for the payload
+                # layout guessed in cube_ble.QUAT_SCALE/QUAT_ORDER. A unit
+                # quaternion has |q| == 1, so norms clustered at 1.0 confirm
+                # the width/endianness/scale; anything else means the parse is
+                # wrong and orientation.jsonl's raw_hex is the material to fix
+                # it with. CHECK THIS BEFORE TRUSTING ANY ROTATION LABEL.
+                "quaternion_enabled":  want_orientation,
+                "quaternion_samples":  orient_stats["n"],
+                "quaternion_norm_mean": (
+                    orient_stats["norm_sum"] / orient_stats["n"]
+                    if orient_stats["n"] else None),
+                "quaternion_norm_min": orient_stats["norm_min"],
+                "quaternion_norm_max": orient_stats["norm_max"],
+                "quaternion_layout_verified": False,
             }, f, indent=2)
+
+        if want_orientation:
+            n = orient_stats["n"]
+            if n == 0:
+                print("\n  WARNING: orientation stream enabled but NO "
+                      "quaternion messages arrived.\n"
+                      "           Either the cube ignored CMD_ENABLE_ORIENTATION "
+                      "(0x38) or\n"
+                      "           MSG_ORIENTATION is not 0x03 on this firmware.")
+            else:
+                mean = orient_stats["norm_sum"] / n
+                ok = 0.9 < mean < 1.1
+                print(f"\n  IMU: {n} quaternion samples, "
+                      f"|q| mean {mean:.4f} "
+                      f"(min {orient_stats['norm_min']:.4f}, "
+                      f"max {orient_stats['norm_max']:.4f})")
+                print("       |q| ~= 1 — payload layout guess holds."
+                      if ok else
+                      "       |q| IS NOT ~1 — the payload layout guess is WRONG.\n"
+                      "       Do not use these quaternions. Fix "
+                      "cube_ble.QUAT_SCALE/QUAT_ORDER\n"
+                      "       against orientation.jsonl's raw_hex first.")
 
 
 def _run_ble_thread(args, session_dir, tracker, error_bucket):
@@ -204,6 +279,14 @@ def main():
     parser.add_argument("--camera",  type=int, default=0)
     parser.add_argument("--skip",    type=int, default=FRAME_SKIP,
                         help="Save every Nth frame (default 1=all)")
+    parser.add_argument("--no-orientation", action="store_true",
+                        help="Disable the cube's ~15Hz IMU quaternion stream. "
+                             "It is ON by default here because it is the only "
+                             "ground truth for whole-cube rotations, which BLE "
+                             "move events cannot see. Turn it off to reproduce "
+                             "pre-2026-08-08 recording conditions, or if the "
+                             "extra BLE traffic is suspected of worsening move "
+                             "timestamp collisions.")
     args = parser.parse_args()
     
     FRAME_SKIP = max(1, args.skip)

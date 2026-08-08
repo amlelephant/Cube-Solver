@@ -64,3 +64,39 @@ Thumbs.db
 .DS_Store
 cv/labeling/autolabel_out/
 cv/labeling/sessions/
+
+# Anticheat / trajectory-model generated artifacts (2026-08-04). The
+# hardlinked dataset and the mined-negative previews are regenerable from
+# materialize_dataset.py / mine_hard_negatives.py; the batch reports and the
+# fitted model are measurement output, not source.
+cv/detection/cube_dataset_hardneg/
+cv/detection/guard_batch_*.json
+cv/detection/trajectory_anomaly.npz
+cv/detection/*.bak
+cv/labeling/mine_out/
+cv/labeling/attack_sessions/
+
+# Waitlist signups (2026-08-05). REAL EMAIL ADDRESSES — never commit these.
+# web/app/api/waitlist/route.ts appends here when WAITLIST_WEBHOOK_URL is
+# unset. Default path is the repo root so it survives a `next build` that
+# wipes web/.next, and so this one rule covers it.
+waitlist.jsonl
+web/waitlist.jsonl
+.env
+.env.local
+
+# Anticheat gate measurement output (regenerable: anticheat_gate.py score /
+# calibrate-poststop, count_check.py, speed_sim.py)
+ble/move_detector/anticheat_gate_*.json
+ble/move_detector/poststop_phantoms_*.json
+
+# Django backend (2026-08-05)
+server/db.sqlite3
+server/staticfiles/
+server/**/__pycache__/
+
+# Uncompressed frame sidecars for memory-mapped training (2026-08-05).
+# Regenerable from the .npz by dataset.ensure_frames_npy; ~2x the npz on
+# disk. They exist so DataLoader workers can share pages instead of each
+# inflating 3.2 GB through the spawn pickle.
+ble/training_data/**/*.frames.npy

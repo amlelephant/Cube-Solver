@@ -1,0 +1,52 @@
+# Line endings.
+#
+# This repo is developed on Windows (`core.autocrlf=true`) and DEPLOYED ON
+# LINUX, which makes CRLF a correctness problem rather than a cosmetic one.
+# Two ways it bites, both already caught once:
+#
+#   * A `.sh` file with CRLF fails as `/bin/bash^M: bad interpreter: No such
+#     file or directory`. The error names a file that plainly exists, so it
+#     reads as a corrupt image rather than as line endings.
+#   * `deploy.sh` sources `.env` with `.` — with CRLF, EVERY value picks up a
+#     trailing carriage return. `DOMAIN` becomes "example.com\r", the
+#     certificate request is for a hostname that does not exist, and the
+#     ALLOWED_HOSTS check fails against a value that looks correct in every
+#     editor.
+#
+# So anything Linux executes or parses is pinned to LF in the working tree,
+# not merely in the index.
+
+# Sensible default: normalise to LF in the repository.
+* text=auto
+
+# Executed or parsed by Linux — LF on disk, always.
+*.sh            text eol=lf
+# Both `.env.example` and `.env.prod.example` — a `*.env.example` pattern
+# matches only the first, and the second is the one that becomes production's
+# `.env`, so the trailing-\r bug would survive exactly where it hurts.
+.env*           text eol=lf
+*.example       text eol=lf
+Dockerfile      text eol=lf
+Caddyfile*      text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+
+# Python and web sources run through Linux containers too.
+*.py            text eol=lf
+*.ts            text eol=lf
+*.tsx           text eol=lf
+
+# Windows-native, leave alone.
+*.ps1           text eol=crlf
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+
+# Binary — never touch.
+*.pt            binary
+*.npz           binary
+*.npy           binary
+*.jpg           binary
+*.jpeg          binary
+*.png           binary
+*.woff2         binary
+*.sqlite3       binary

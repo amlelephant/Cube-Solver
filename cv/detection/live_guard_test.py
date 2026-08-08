@@ -36,14 +36,32 @@ Keys:
 
 import argparse
 import json
+import os
 import time
 
 import cv2
+import numpy as np
 
 from continuity_guard import (ContinuityGuard, box_signature, dedup_boxes,
                               detect_cubes, EDGE_MARGIN, FRAME_STALL_DQ_S,
                               GAP_DQ_S, GAP_FLAG_S, MULTI_CONF, MULTI_DQ_HITS,
-                              PRESENCE_CONF)
+                              PRESENCE_CONF, _sig_dist)
+from swap_check import WINDOW_S as SWAP_WINDOW_S, GUARD_S as SWAP_GUARD_S, MIN_SIDE
+
+# Live substitution meter (2026-08-04). Shows swap_check.py's persistent
+# appearance-change statistic in real time so a swap attempt can be tried
+# against it interactively. DISPLAY ONLY — it never DQs, because its
+# threshold is not calibrated yet (swap_check.py baseline measures the
+# legit ceiling; attack sessions measure whether swaps clear it). Wiring an
+# uncalibrated bar into the verdict is how you ship a false-DQ.
+SWAP_REF = None   # legit ceiling from swap_check.py baseline, if measured
+for _p in ("../../swap_check_baseline.npz", "swap_check_baseline.npz"):
+    if os.path.isfile(_p):
+        try:
+            SWAP_REF = float(np.load(_p)["legit_max"])
+        except Exception:
+            SWAP_REF = None
+        break
 
 VERDICT_COLOR = {          # BGR
     "pass": (60, 200, 60),
@@ -64,7 +82,43 @@ def _put(frame, text, org, color=(255, 255, 255), scale=0.55, thick=1):
                 color, thick, cv2.LINE_AA)
 
 
-def draw_hud(frame, guard, rep, boxes, deduped, t, fps):
+class SwapMeter:
+    """Rolling persistent-appearance-change score, matching swap_check.py.
+
+    Keeps a short (t, signature) history and continuously compares the
+    stable window BEFORE the guard instant against the stable window AFTER,
+    so the number on screen is the same statistic the offline detector
+    scores sessions with — what you break here is what the detector sees.
+    """
+
+    def __init__(self):
+        self.hist = []          # [(t, sig)]
+        self.peak = 0.0
+        self.peak_t = None
+
+    def update(self, t, sig):
+        if sig is not None:
+            self.hist.append((t, np.asarray(sig, dtype=np.float32)))
+        span = 2 * (SWAP_WINDOW_S + SWAP_GUARD_S) + 0.5
+        self.hist = [(ht, hs) for ht, hs in self.hist if t - ht <= span]
+        # split at the instant that has a full window on both sides
+        t_split = t - SWAP_GUARD_S - SWAP_WINDOW_S
+        pre = [s for ht, s in self.hist
+               if t_split - SWAP_WINDOW_S - SWAP_GUARD_S <= ht <= t_split - SWAP_GUARD_S]
+        post = [s for ht, s in self.hist
+                if t_split + SWAP_GUARD_S <= ht <= t_split + SWAP_GUARD_S + SWAP_WINDOW_S]
+        if len(pre) < MIN_SIDE or len(post) < MIN_SIDE:
+            return None
+        d = _sig_dist(np.median(pre, axis=0), np.median(post, axis=0))
+        if d > self.peak:
+            self.peak, self.peak_t = d, t_split
+        return d
+
+    def reset(self):
+        self.__init__()
+
+
+def draw_hud(frame, guard, rep, boxes, deduped, t, fps, swap=None, swap_now=None):
     fh, fw = frame.shape[:2]
 
     # border zone: gaps/jumps touching the outside of this line are
@@ -115,6 +169,28 @@ def draw_hud(frame, guard, rep, boxes, deduped, t, fps):
     _put(frame, f"frame gap: {frame_dt:4.2f}s  max {rep['max_frame_gap_s']:.2f}s "
                 f"(DQ {FRAME_STALL_DQ_S:.2f}s)",
          (10, y), MULTI_COLOR if stalling else (255, 255, 255)); y += 22
+
+    if swap is not None:
+        ref = SWAP_REF
+        now_s = f"{swap_now:.3f}" if swap_now is not None else " --  "
+        over = ref is not None and swap.peak > ref
+        col = MULTI_COLOR if over else (255, 255, 255)
+        _put(frame, f"substitution meter: now {now_s}   peak {swap.peak:.3f}"
+                    + (f"  (legit max {ref:.3f})" if ref else "  (uncalibrated)"),
+             (10, y), col); y += 22
+        # a bar, so a swap attempt is visible at a glance
+        bx, bw = 10, 320
+        full = max(ref * 1.4, 0.6) if ref else 0.6
+        cv2.rectangle(frame, (bx, y - 12), (bx + bw, y), (60, 60, 60), 1)
+        cv2.rectangle(frame, (bx, y - 12),
+                      (bx + int(bw * min(swap.peak / full, 1.0)), y),
+                      MULTI_COLOR if over else ONE_COLOR, -1)
+        if ref:
+            rx = bx + int(bw * min(ref / full, 1.0))
+            cv2.line(frame, (rx, y - 15), (rx, y + 3), (0, 200, 255), 2)
+        _put(frame, "display only - never DQs", (bx + bw + 10, y - 1),
+             (140, 140, 140), 0.45)
+        y += 24
 
     for e in rep["events"][-TICKER_LINES:]:
         detail = {k: v for k, v in e.items() if k not in ("t", "type")}
@@ -168,6 +244,7 @@ def main():
     detect_cubes(frame, conf_floor=PRESENCE_CONF)
 
     guard = ContinuityGuard(fw, fh)
+    swap = SwapMeter()
     t0 = time.perf_counter()
     fps, last = 0.0, time.perf_counter()
 
@@ -188,13 +265,14 @@ def main():
             sig = (box_signature(frame, max(deduped, key=lambda b: b[4]))
                    if deduped else None)
             guard.update(t, boxes, sig)
+            swap_now = swap.update(t, sig)
             rep = guard.report()
 
             now = time.perf_counter()
             fps = 0.9 * fps + 0.1 / max(1e-6, now - last) if fps else 1 / max(1e-6, now - last)
             last = now
 
-            draw_hud(frame, guard, rep, boxes, deduped, t, fps)
+            draw_hud(frame, guard, rep, boxes, deduped, t, fps, swap, swap_now)
             cv2.imshow("continuity guard — try to break it", frame)
 
             key = cv2.waitKey(1) & 0xFF
@@ -204,6 +282,7 @@ def main():
                 print("\n[guard-test] === attempt finished — report: ===")
                 finish(guard)
                 guard = ContinuityGuard(fw, fh)
+                swap.reset()
                 t0 = time.perf_counter()
                 print("[guard-test] guard reset — new attempt\n")
             elif key in (ord("s"), ord("S")):

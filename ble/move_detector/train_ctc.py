@@ -121,7 +121,8 @@ def train(args):
 
     torch.manual_seed(args.seed)
 
-    streams = load_joint_streams(session_dirs, sigma=args.sigma)
+    streams = load_joint_streams(session_dirs, sigma=args.sigma,
+                                 mmap=args.workers > 0)
     if not streams:
         sys.exit("No prepared colour sessions. Run "
                  "`prepare_data.py --color` first.")
@@ -147,7 +148,8 @@ def train(args):
     train_ds = CTCClipDataset(train_s, clip_len=args.clip_len,
                               stride=args.stride, augment=True,
                               seed=args.seed,
-                              aug_strength=args.aug_strength)
+                              aug_strength=args.aug_strength,
+                              speed_aug=args.speed_aug)
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
                               num_workers=args.workers, drop_last=True,
                               collate_fn=ctc_collate,
@@ -244,6 +246,7 @@ def train(args):
                 "blank": BLANK,
                 "aux_onset_weight": args.aux_onset_weight,
                 "aug_strength": args.aug_strength,
+                "speed_aug": args.speed_aug,
             }, out_path)
 
         if epoch - best_epoch >= args.patience:
@@ -305,6 +308,19 @@ def main():
                         "were trained on a much narrower range than any "
                         "value here reproduces, so compare against them by "
                         "checkpoint, not by this flag.")
+    p.add_argument("--speed-aug", type=float, default=0.0,
+                   help="P(a clip is time-warped to look like a faster "
+                        "solve); dataset.AUG_SPEED sets the multiplier "
+                        "range. 0 = off, reproducing every checkpoint "
+                        "before 2026-08-05. The corpus runs ~2.4 TPS and "
+                        "speed_sim.py measured count retention falling to "
+                        "0.81 at 6 TPS, so the onset arm has simply never "
+                        "seen a fast turn. VAL MER WILL LOOK WORSE with "
+                        "this on and that is expected — the val split is "
+                        "slow footage too, so the extra capacity spent on "
+                        "speeds it does not contain scores as a regression "
+                        "there. Judge it on speed_sim.py's retention curve, "
+                        "which is the thing it is meant to move.")
     p.add_argument("--grad-clip", type=float, default=5.0,
                    help="CTC gradients spike early; clipping is not optional")
     p.add_argument("--beam", type=int, default=16)
