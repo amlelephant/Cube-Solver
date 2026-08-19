@@ -1,9 +1,10 @@
 # Cube Solver
 
 A computer-vision and machine-learning pipeline for verifying a Rubik's
-Cube solve from webcam video alone — no smart cube required. It locates
+Cube solve from webcam video alone. It locates
 the cube, reads its state, and checks the result against the group
-theory of the cube.
+theory of the cube. This project is meant to bridge the gap between those
+that own and do not own smart cubes.
 
 Two paths, both webcam-based:
 
