@@ -1,0 +1,158 @@
+\section{Background}
+\label{sec:background}
+
+This section exists so the rest of the report can be read without looking
+anything up. A reader who already knows WCA notation and CTC can skip to
+\cref{sec:data}.
+
+\subsection{The cube as a group}
+
+Label the six faces \wca{U}p, \wca{D}own, \wca{L}eft, \wca{R}ight,
+\wca{F}ront, \wca{B}ack. A \emph{quarter turn} rotates one face by
+$90^\circ$: \wca{R} clockwise (looking at that face), \wca{R'}
+anticlockwise. \wca{R2} is a half turn and in this system is always
+represented as two quarter turns, which matters more than it sounds
+(\cref{sec:qtm}).
+
+Configurations of the cube form a group $G$ under composition of moves,
+with $|G| = 43{,}252{,}003{,}274{,}489{,}856{,}000 \approx 4.3\times10^{19}$.
+The concrete representation used throughout the code is the standard
+\emph{cubie} encoding: a permutation of 8 corners with orientations in
+$\mathbb{Z}_3$, and a permutation of 12 edges with orientations in
+$\mathbb{Z}_2$, i.e.\ a vector in
+$S_8 \times \mathbb{Z}_3^8 \times S_{12} \times \mathbb{Z}_2^{12}$ subject
+to three parity constraints. Composition is array indexing, so a beam of
+thousands of hypotheses can be advanced by one move with a single vectorised
+operation --- this is why the decoder in \cref{sec:reconstruct} is
+affordable at all.
+
+Two facts about $G$ are load-bearing later.
+
+\begin{description}[leftmargin=1.2em,style=nextline,itemsep=2pt]
+\item[Every quarter turn flips permutation parity.] A quarter turn is a
+4-cycle on corners and a 4-cycle on edges, each odd, so the total
+permutation parity flips. Consequently the parity of the number of quarter
+turns in a word is determined by its endpoints. A hypothesis whose remaining
+move budget has the wrong parity provably needs an extra insertion or
+deletion, which gives the decoder a free admissible lower bound
+(\cref{sec:heuristic}).
+\item[God's number is 20 in the half-turn metric and 26 in the quarter-turn
+metric.] \label{sec:qtm} Every state is at most 20 half turns, or 26 quarter
+turns, from solved \cite{rokicki2014,rokicki2010}. Because this system's
+alphabet has no half-turn symbol, \emph{all} of its counting is
+quarter-turn, and a threshold calibrated on the more famous number 20 would
+be set below the quantity it is supposed to bound. \cref{sec:count-gate}
+depends on getting this right.
+\end{description}
+
+\subsection{How humans actually solve, and why it matters}
+
+The dominant method, CFOP, proceeds in four phases: a cross on one face
+($\sim$8 moves), four \emph{first-two-layers} (F2L) pairs inserted one at a
+time ($\sim$30 moves), then orientation and permutation of the last layer
+(OLL/PLL) executed as memorised \emph{algorithms} --- fixed 8--15 move words
+drawn from a personal repertoire of a few dozen.
+
+Two consequences run through this report. First, a human solve is far longer
+than an optimal one: 50--130 quarter turns against a solver's $\le 26$. That
+gap is the entire basis of the anticheat count gate (\cref{sec:count-gate}).
+Second, the last third of a solve is drawn from a small closed vocabulary,
+which suggests a language model or algorithm prior should help a lot. The
+repository pursued that idea hard; \cref{sec:negatives} records that it
+bought $0.2$ points.
+
+\subsection{Connectionist temporal classification}
+\label{sec:ctc-bg}
+
+CTC \cite{graves2006} is the standard answer to ``I have a sequence of
+$T$ frames and a target sequence of $U \ll T$ symbols, and I do not know
+which frame produced which symbol.''
+
+Let $\mathcal{A}$ be the label alphabet ($|\mathcal{A}| = 12$ here) and let
+$\mathcal{A}' = \mathcal{A}\cup\{\varnothing\}$ add a \emph{blank}. The
+network emits, for each frame $t$, a distribution $y^t$ over $\mathcal{A}'$
+(so 13 columns). A \emph{path} $\pi \in \mathcal{A}'^T$ assigns one symbol
+to every frame, with probability
+\begin{equation}
+p(\pi \mid x) \;=\; \prod_{t=1}^{T} y^t_{\pi_t},
+\label{eq:pathprob}
+\end{equation}
+which assumes conditional independence across frames given the network
+output --- an assumption we return to in \cref{sec:ctc-limits}.
+
+The \emph{collapse} map $\mathcal{B}$ takes a path to a label sequence by
+first merging runs of identical symbols and then deleting blanks:
+$\mathcal{B}(\wca{R}\,\wca{R}\,\varnothing\,\wca{R}\,\wca{U}) =
+\wca{R}\,\wca{R}\,\wca{U}$. The probability of a label sequence $\ell$ is
+the total probability of every path that collapses to it:
+\begin{equation}
+p(\ell \mid x) \;=\; \sum_{\pi \in \mathcal{B}^{-1}(\ell)} p(\pi \mid x),
+\label{eq:ctcmarginal}
+\end{equation}
+and training minimises $-\log p(\ell^\star \mid x)$ for the true label
+sequence $\ell^\star$. The sum in \cref{eq:ctcmarginal} has exponentially
+many terms and is computed in $O(TU)$ by a forward--backward recursion over
+an extended target $\ell' = \varnothing\, \ell_1\, \varnothing\, \ell_2
+\cdots \ell_U\, \varnothing$ of length $2U+1$: with
+$\alpha_t(s)$ the total probability of all prefixes of paths that have
+consumed $\ell'_{1:s}$ by frame $t$,
+\begin{equation}
+\alpha_t(s) \;=\; y^t_{\ell'_s}\cdot
+\begin{cases}
+\alpha_{t-1}(s) + \alpha_{t-1}(s-1)
+  & \text{if } \ell'_s = \varnothing \text{ or } \ell'_s = \ell'_{s-2},\\[2pt]
+\alpha_{t-1}(s) + \alpha_{t-1}(s-1) + \alpha_{t-1}(s-2)
+  & \text{otherwise.}
+\end{cases}
+\label{eq:ctcforward}
+\end{equation}
+The case split is the entire content of CTC and is worth internalising: the
+three-term recursion is the ordinary ``advance to the next target symbol''
+step, and the two-term case says that you may \emph{not} skip a blank when
+the symbol before it is the same as the one after it. That restriction is
+what makes a genuine repeat expressible --- and it is also the source of
+CTC's one structural failure mode here, discussed next.
+
+\paragraph{The structural miss.} Two identical consecutive labels require an
+intervening blank frame. So a true \wca{R}\,\wca{R} whose two turns are one
+frame apart at 30\,fps \emph{cannot} be emitted as two symbols, no matter how
+good the network is. In this corpus that costs
+\CTCFloorHoldout\% of held-out onsets, i.e.\ a ceiling of
+\CTCCeilingHoldout\% per-move accuracy that no amount of training removes.
+It is a real cost of the design, and it is quantified rather than waved at
+because it bounds every result in \cref{sec:experiments}. Half turns are
+\emph{not} the mechanism (a half turn's two quarter turns are a median
+$\sim$0.33\,s apart, ten frames, so they are cleanly separable); the
+mechanism is genuine two-handed simultaneity.
+
+\subsection{Related problem shapes}
+
+The pipeline is an assembly of three well-studied shapes, and naming them
+correctly is useful for knowing what literature to steal from.
+
+\begin{itemize}[leftmargin=1.3em,itemsep=2pt]
+\item \textbf{Temporal action spotting / onset detection.} Finding the
+instant of a brief event in continuous video. The pre-CTC arm of this
+project was exactly this: a per-frame score with Gaussian targets, peak
+picked. The music-onset-detection literature \cite{bock2012} uses the same
+construction, including the Gaussian-smeared targets and the
+minimum-separation peak picker, and the failure mode observed here (two
+events inside one hump) is the same one reported there.
+\item \textbf{Sequence transduction without alignment.} CTC \cite{graves2006}
+came from speech; the version used here is unmodified, with a
+character-level analogue in which ``characters'' are quarter turns. The
+prefix beam search of \cref{sec:prefixbeam} is Hannun et al.'s
+\cite{hannun2014}.
+\item \textbf{Noisy-channel decoding against a hard constraint.} Given a
+corrupted string and a formal constraint the true string must satisfy, find
+the minimum-cost correction. This is spell correction, it is constrained
+decoding in MT, and here the constraint is membership of a specific coset of
+the cube group. \cref{sec:reconstruct} is a beam search over that.
+\end{itemize}
+
+\noindent The one thing that has \emph{no} obvious literature analogue is
+the verification framing: a decoder whose output is used as evidence about
+whether the input was honest. The closest analogue is presentation-attack
+detection in biometrics, and the borrowed lesson --- that a detector
+evaluated only on genuine inputs has not been evaluated --- is why
+\cref{sec:falsifiability} exists.

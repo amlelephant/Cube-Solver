@@ -1,0 +1,38 @@
+[
+  {
+    "model": "move_ctc_spd_s0",
+    "regime": "daytime",
+    "n": 9,
+    "raw_mean": 0.9060675679754403,
+    "post_mean": 0.9071157860047904,
+    "post_min": 0.7785714285714286,
+    "verified": 0,
+    "exact": 0,
+    "decoys_accepted": 0,
+    "decoys_tried": 36
+  },
+  {
+    "model": "move_ctc_spd_s0",
+    "regime": "evening",
+    "n": 5,
+    "raw_mean": 0.8493912818027077,
+    "post_mean": 0.8478614911424822,
+    "post_min": 0.7261904761904762,
+    "verified": 0,
+    "exact": 0,
+    "decoys_accepted": 0,
+    "decoys_tried": 20
+  },
+  {
+    "model": "move_ctc_spd_s0",
+    "regime": "all",
+    "n": 14,
+    "raw_mean": 0.8858260371994644,
+    "post_mean": 0.8859535378396803,
+    "post_min": 0.7261904761904762,
+    "verified": 0,
+    "exact": 0,
+    "decoys_accepted": 0,
+    "decoys_tried": 56
+  }
+]

@@ -1,0 +1,40 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+A \NParams-parameter convolutional model trained with a CTC objective reads
+a human speedsolve from a webcam at \CIDayMean\% [\CIDayLo, \CIDayHi]
+per-move accuracy in reasonable light and \CIEveMean\%
+[\CIEveLo, \CIEveHi] in poor light, measured on
+\NHoldoutSolves\ solves and \NHoldoutMoves\ turns that no evaluated
+checkpoint has seen in training or in validation. A group-theoretic beam
+search over edits then attempts to repair the transcript against the known
+scramble and the solved end state --- and, on this holdout, achieves
+\DecodeGain\ points and \DecodeVerified\ verifications out of
+\DecodeTrials. A move-count gate --- thresholding a quantity bounded by
+God's number rather than by a fit --- separates genuine solves from
+solver-following proxies by tens of moves with no false disqualifications.
+
+The two things worth carrying away are both negative, and both are about
+measurement rather than method.
+
+The first is that the constraint which makes this problem tractable in
+principle --- the output space is a group and both endpoints are known ---
+buys \emph{nothing measurable} at this error rate, and the reason
+generalises. The constraint is \emph{terminal}: it discriminates nothing
+until the last move, so it repairs sessions that were nearly right already
+and abandons the ones that were not. On a holdout with no nearly-right
+sessions it abandons all of them. Constraint \emph{density}, not constraint
+strength, is what a decoder can use, and that is a measurable, testable
+claim this corpus is well set up to answer (\cref{sec:gap}).
+
+The second is that the validation split used to steer this project was
+structurally incapable of ranking its two largest interventions, because it
+was drawn from the regime that already worked. The ablation in
+\cref{sec:ablation} exists only because the holdout was re-derived from the
+checkpoints themselves and doubled in size; on the old split, speed
+augmentation looks free, and on this one it is the largest and most
+significant change on record. The same measurement, run the same way, also
+says the headline architectural change --- migrating to CTC --- cannot be
+distinguished from noise. Both of those are only visible from an honest
+holdout with intervals attached. A holdout is not paperwork; it is the only
+instrument in the building that can see the things that matter.

@@ -1,0 +1,50 @@
+% Architecture / dataflow diagram.
+% Requires: tikz with arrows.meta, positioning (loaded in main.tex).
+\begin{tikzpicture}[
+  font=\small,
+  box/.style={draw=prule, fill=white, rounded corners=2pt, line width=0.7pt,
+              minimum height=11mm, text width=30mm, inner sep=4pt,
+              align=center},
+  learned/.style={box, draw=pblue, fill=pblue!7},
+  search/.style={box, draw=pviolet, fill=pviolet!7},
+  data/.style={box, draw=pgrey!45, fill=pbox},
+  gate/.style={box, draw=porange, fill=porange!8},
+  ar/.style={-{Stealth[length=4pt]}, draw=pgrey, line width=0.7pt},
+  lbl/.style={font=\scriptsize, color=pgrey, inner sep=2pt},
+]
+
+% row 1 --- capture and preprocessing
+\node[data]                          (cam)   at (0,0)      {webcam\\[-2pt]\scriptsize 30\,fps JPEG};
+\node[data, right=7mm of cam]        (yolo)                {YOLOv8n crop\\[-2pt]\scriptsize every 10th frame,\\[-3pt]\scriptsize median $+$ interpolate};
+\node[data, right=7mm of yolo]       (stack)               {$96{\times}96$, 4 channels\\[-2pt]\scriptsize RGB $+$ $\Delta$luma};
+
+% row 2 --- the network
+\node[learned, below=9mm of cam]     (enc)                 {frame encoder\\[-2pt]\scriptsize 4 conv, shared\\[-3pt]\scriptsize $\to\mathbb{R}^{128}$ per frame};
+\node[learned, right=7mm of enc]     (tcn)                 {dilated TCN\\[-2pt]\scriptsize 4 blocks $d\!=\!1,2,4,8$\\[-3pt]\scriptsize RF 61 fr ($2.0$\,s)};
+\node[learned, right=7mm of tcn]     (head)                {$1{\times}1$ head\\[-2pt]\scriptsize 13 logits / frame\\[-3pt]\scriptsize 12 turns $+$ blank};
+
+% row 3 --- the two searches and the gate
+\node[search, below=9mm of enc]      (beam)                {CTC prefix beam\\[-2pt]\scriptsize search over \emph{frames}\\[-3pt]\scriptsize $\Rightarrow$ move string};
+\node[search, right=7mm of beam]     (recon)               {group decode\\[-2pt]\scriptsize beam over edits\\[-3pt]\scriptsize must reach solved};
+\node[gate,   right=7mm of recon]    (gate)                {count gate\\[-2pt]\scriptsize QTM floor $=32$\\[-3pt]\scriptsize verified / review / reject};
+
+% row 4 --- side inputs
+\node[data, below=9mm of beam, draw=paqua, fill=paqua!8] (ble)
+      {\textbf{BLE cube}\\[-2pt]\scriptsize labels + ground truth,\\[-3pt]\scriptsize \emph{never an input}};
+\node[data, below=9mm of recon]      (states)              {known endpoints\\[-2pt]\scriptsize server scramble\\[-3pt]\scriptsize $+$ solved};
+
+% arrows
+\draw[ar] (cam)   -- (yolo);
+\draw[ar] (yolo)  -- (stack);
+\draw[ar] (stack.south) -- ++(0,-4.5mm) -| (enc.north);
+\draw[ar] (enc)   -- (tcn);
+\draw[ar] (tcn)   -- (head);
+\draw[ar] (head.south)  -- ++(0,-4.5mm) -| (beam.north);
+\draw[ar] (beam)  -- node[lbl, above]{transcript}   (recon);
+\draw[ar] (recon) -- node[lbl, above]{repaired}     (gate);
+\draw[ar] (states.north) -- (recon.south);
+\draw[ar, draw=paqua, dashed] (ble.east) -- (states.west);
+\draw[ar] (beam.east) .. controls +(10mm,-9mm) and +(-14mm,-9mm)
+          .. node[lbl, below, pos=0.55]{move \emph{count}} (gate.south);
+
+\end{tikzpicture}

@@ -188,7 +188,156 @@ legible when the move model is not.
 - `cv/detection/swap_check.py` — persistent (not adjacent-frame) appearance
   change. Adjacent-frame distance is the wrong statistic: every turn
   recolours a face and blur spikes it, but those changes are transient. A
-  substitution is large *and* persistent.
+  substitution is large *and* persistent. **Measured dead** — see §2.2.
+- `cv/detection/solved_check.py` — **was the cube solved at the timer stop**
+  (2026-08-10). The arm that closes §3's surviving attack; see §2.1.
+
+### 2.1 Solved-at-stop: asking a question that has an answer
+
+Appearance-based substitution detection asks "is this the same cube", which
+is unanswerable when the attacker's second cube is the same brand under the
+same light — and that is the cube they will use. `solved_check.py` asks
+instead:
+
+> at the moment the timer stopped, was the cube on camera solved?
+
+A cheat that makes a full solve's worth of moves without solving has a
+scrambled cube on camera at `t_stop`, and is caught **before** any
+substitution happens. Nothing about cube identity is needed.
+
+**The statistic is colour fragmentation, not colour identity.** A solved cube
+shows 1–3 *solid* faces; a scrambled one is a mosaic of the same colours. So
+count the distinct solid regions (`n_regions`). No facelet registration is
+involved — which matters, because `cube_detector` boxes the whole cube and
+its 3×3 slice only lands on real facelets when a face is held flat-on, and at
+the timer stop the cube is at whatever angle the solver's hands left it.
+
+**Opposite faces are merged into three axis classes (W/Y, R/O, B/G), and this
+is free.** A solved cube can never show both faces of an opposite pair, so
+merging costs nothing on the solved side — while deleting every hard colour
+pair in this project at once, orange/red above all. The cost lands only on
+the scrambled side, where the mosaic reads slightly *less* fragmented than it
+is; that makes the test conservative, so its error is a miss and never a
+false DQ.
+
+**Measured, held out by date** (`*_solve` sessions end solved, `*_scramble`
+end scrambled — the same structural proxy the count gate's 21/21 rests on,
+and here it is even more direct, since the question literally is "is this
+cube solved"). Threshold `n_regions > 4`:
+
+| date cut | held-out catch | held-out false DQ |
+|---|---|---|
+| before 2026-07-28 | 71% (10/14) | **0** (0/14) |
+| before 2026-07-31 | 90% (9/10) | **0** (0/10) |
+| before 2026-08-02 | 100% (8/8) | **0** (0/8) |
+
+Read the catch column as "roughly three quarters to all": each holdout has
+8–14 attacks, so one session is 7–12 points and the spread between those
+cells is noise. The false-DQ column is the one making a claim. In-sample the
+solved median is **3 regions — exactly the three visible faces**, against 5
+for scrambled.
+
+`n_regions` ships rather than the better-looking `fragmentation`, which peaks
+higher in sample and false-DQs in 10 of 15 swept settings when held out. Its
+threshold is pinned by the single worst legit solve, making it an
+`extreme`-kind statistic — judge those on their worst column, per the metric
+robustness work.
+
+**Known residual, diagnosed not guessed:** in warm evening light the
+*background* classifies as one enormous solid region, the wall becomes the
+largest blob, and a scrambled cube scores as solved. Three geometric fixes
+were tried and all measured worse than no mask (hexagon 80%, ellipse 60%,
+tighter centre crop held no line at all) — the cube fills most of its own
+box, so any mask that removes background removes cube in proportion. The real
+fix is a cube *segmentation* rather than a box. Until then this is the same
+evening-lighting cliff as everywhere else, and the response is abstention.
+
+**It is evadable** by presenting the cube badly at the stop. That path leads
+to `REVIEW`, not `VERIFIED`, which is the correct handling of deliberate
+unreadability.
+
+#### 2.1a The 0-false-DQ result does not reach the live call (2026-08-10)
+
+Everything above is measured by `solved_check.py score`, and re-running it
+fresh reproduces it exactly: **0 false DQ on 28 legit solves, 20/28 caught.**
+The number is real. What it is a property of is narrower than it looks.
+
+That measurement reads **`tail_window`** — 1.5 s ending 0.5 s before the last
+frame of the recording — with boxes from **`trajectory.npz`**, i.e. raw
+`continuity_guard.detect_cubes` output. The live call does neither.
+`live_anticheat.stop_window_solved` and `verify_solve._solved_at_stop` read
+the frames **straddling the timer stop**, with boxes from
+`prepare_data.per_frame_boxes`, which squares the box and adds
+`crop_utils.CROP_MARGIN = 0.12`.
+
+Both differences matter, and `ble/move_detector/stop_window_check.py` runs
+the 2×2 to say how much (same 28+28 sessions, same `solved_at`, same
+palette — only these two factors move):
+
+| | false DQ / 28 legit | caught / 28 |
+|---|---|---|
+| **[A]** tail window + trajectory boxes — *the published cell* | **0** | 20 |
+| **[B]** tail window + per-frame boxes (+12% margin) | 2 | 17 |
+| **[C]** timer stop + trajectory boxes | 2 | 23 |
+| **[D]** timer stop + per-frame boxes — **what the live gate does** | **3** | 18 |
+
+Each factor costs ~2 false DQ on its own; together, 3 — **10.7%, against a
+launch requirement of under 1%.**
+
+**Why it is this fragile.** The operating point is chosen as one step above
+the worst observed legit session (worst legit = exactly `4.000` regions,
+threshold "> 4"). By construction it has **no false-DQ margin at all**, so
+any change to its input spends margin it does not have. That is a property
+of how the threshold was derived, not a flaw in the statistic.
+
+**Retuning does not rescue it.** Give each cell its own zero-false-DQ
+threshold and the catch rate is the price:
+
+| cell | zero-false-DQ threshold | catch |
+|---|---|---|
+| [A] tail + trajectory | > 4 | **20/28 (71%)** |
+| [B] tail + per-frame | > 5 | 10/28 (36%) |
+| [C] stop + trajectory | > 6 | 11/28 (39%) |
+| [D] stop + per-frame | > 5 | 13/28 (46%) |
+
+So at the timer stop, honestly tuned, the arm catches **under half** — not
+the 71–100% in the table above.
+
+One genuinely encouraging detail: the *window* move helps the catch side. At
+the shipped threshold, [C] catches 23/28 against [A]'s 20/28 — a scrambled
+cube reads as more obviously scrambled at the stop than at the end of the
+recording, which is what one would hope. It is the false-DQ side, and the
+zero-margin threshold, that the move breaks.
+
+**What this does NOT mean.** It does not mean raise `SOLVED_MAX_REGIONS` —
+that hands the attack back exactly the margin the test exists to take away.
+The options are to re-derive the threshold on what the live call actually
+feeds (accepting ~46% catch), or to move the live evaluation to a window
+where the cube is deliberately presented — which is the post-stop scan
+window, already covered on the custody side, so evaluating there costs the
+attacker nothing they did not already have. Neither is done.
+
+**Caveats on this measurement**, in both directions: n = 28 per side; the
+"timer stop" is simulated at `last_onset + 1.0 s` rather than a real button
+press, chosen generous in the direction that helps the test; and `*_scramble`
+tails remain a proxy for the attack rather than a recording of it.
+
+### 2.2 What is dead, and must not be re-proposed
+
+Appearance-*magnitude* substitution detection. Over 68 legit sessions the
+persistent-change statistic runs median 0.472 / p90 0.587 / **max 0.857** on
+a 0–1 scale, so a zero-false-positive threshold sits near 0.94: there is no
+gap to put a threshold in. The cause is decisive — **the largest persistent
+appearance change in an honest session is the solve completing**, mixed
+colours to solid faces, the exact transformation a swap produces at the exact
+moment it would produce it. Sessions ending solved peak at 0.542 at 82%
+through; sessions ending scrambled peak at 0.384 at 40% through.
+
+That also explains 2 live false DQs: `continuity_guard` DQs at
+`SIG_DIST=0.45`, below the 0.542 median peak of a legit finishing solve.
+
+§2.1 is the successor: not how *big* the change was, but whether the cube was
+lawfully solved when the clock stopped.
 
 Known open hole: **the table-edge swap** (cube leaves frame under the table
 edge mid-frame). `cv/labeling/record_attack.py` records these; one session
@@ -204,23 +353,39 @@ of them, and they fail in different conditions.
 
 | Arm | Sees | Blind to |
 |---|---|---|
-| Count gate | too few moves, moves after the timer | **a swap that arrives with enough moves** (below), anything at ≥7 TPS, anything in bad light |
+| Count gate | too few moves, moves after the timer | a swap that arrives with enough moves, anything at ≥9.6 TPS, anything in bad light |
 | Continuity guard | cube leaving/duplicating/teleporting | a swap fully inside the frame |
-| Appearance | a different cube before vs after | a swap to a visually identical cube |
+| **Solved-at-stop** | **a cube that was not solved when the clock stopped** | a cube presented unreadably at the stop (→ review); evening light |
+| **Post-stop custody** | **the cube changing identity between the stop and the scan** | a swap to a visually identical cube *within* the tracked trajectory |
+| Appearance magnitude | — | everything; measured dead, §2.2 |
 
-**The one physical attack that survives the count gate**, stated plainly
-because it is easy to believe the gate closed more than it did: make a full
-solve's worth of plausible moves on camera *without solving*, then swap in a
-solved cube. That reads as ~50 moves, clears the floor of 32, and the count
-gate passes it — fifty seconds of flailing is not required, eight will do,
-which makes it a world-class time. Nothing about the move count distinguishes
-it from a real solve, because the move count is genuinely real; only the
-*outcome* is faked.
+**The attack that used to survive the count gate.** Make a full solve's worth
+of plausible moves on camera *without solving*, then swap in a solved cube.
+That reads as ~50 moves, clears the floor of 32, and the count gate passes it
+— eight seconds of flailing suffices, which makes it a world-class time.
+Nothing about the move count distinguishes it from a real solve, because the
+move count is genuinely real; only the *outcome* is faked.
 
-Continuity and appearance own this case entirely, which is why the recorded
-attack sessions still matter and why they should be **this shape
-specifically** rather than generic swap variety. It is also the reason the
-count gate can never be the only arm.
+**Closed as of 2026-08-10, by two arms that only work together.** The attack
+has a seam: the substitution must happen *after* the timer stops, because a
+solved cube presented earlier would have to be turned for the remaining
+"solve" and would come apart. So:
+
+1. **Solved-at-stop** (§2.1) says the cube was already solved when the clock
+   stopped. The flailer's cube is not, and this fires before any swap.
+2. **Post-stop custody** — a `ContinuityGuard` over the scan window *alone* —
+   says it is still the same tracked object when the scan validates it.
+
+Either one alone leaves the swap a window to occur in; together there is
+none. Custody is demanded only over the post-stop window rather than the
+whole attempt on purpose: that window is short and deliberate, the cube is
+being *presented* rather than manipulated, and no hands cross it — whereas
+whole-session continuity at DQ strength is exactly what drives the measured
+10.1% false-DQ rate.
+
+What is left is the residual in §2.1: a cheat who deliberately obscures the
+cube at the stop reaches `REVIEW` rather than `VERIFIED`, and evening light
+degrades the arm. Neither is a pass.
 
 The paid tier's move stream is **corroborating evidence** only — it never
 issues a verdict (LAUNCH_ROADMAP C4).
@@ -290,6 +455,52 @@ Measured after: **34.7 fps sustained** against `detect_cubes`'s own 37 fps
 ceiling, so the whole harness — guard, swap meter, encode, HUD — costs 1.8 ms
 a frame on top of the detector that both tools were always paying for.
 
+## 3.2 Can the move CLASSIFIER gate, not just the count?
+
+Measured 2026-08-10, `ble/move_detector/solve_distance.py`. The idea: replay
+the decoded moves from the server-issued scramble and DQ if the end state is
+too far from solved — a hard maximum on "distance to an actual solve". It is
+the natural next question once the count gate exists, and the answer is
+asymmetric.
+
+**As a DQ rule it catches nothing.** 4 of 24 honest solves replay to
+`n_solved = 0`, as scrambled as a uniformly random sequence, so a threshold
+that never false-DQs sits at 0 and DQs 0/4800 of every null.
+
+The mechanism is exact: `n_solved` is very nearly a deterministic function of
+the decode's **edit distance**, not of honesty.
+
+| edit distance | 0 | 1 | 2 | 3 | 6–7 | 10–11 | 13+ |
+|---|---|---|---|---|---|---|---|
+| n_solved | 20 | 12 | 7, 9 | 6 | 2–4 | 3, 5 | 0–2 |
+
+All seven 1-error sessions land on exactly 12. A mid-sequence error does not
+nudge the end state, it **conjugates** it, and a conjugated quarter turn
+scatters. The first error costs ~8 cubies and the signal is inside the random
+floor by ~5 errors — while daytime word error already puts a typical solve at
+1–3 errors and the tail at 30+. This is the verification accuracy cliff
+arriving through a new door.
+
+**As positive evidence it survives**, because the direction is not symmetric:
+landing *near* solved cannot happen by accident. Threshold pinned above every
+null, so zero false accepts:
+
+| null model | best of 4800 | honest solves verified |
+|---|---|---|
+| random flail | 5 | **13/24 = 54%** |
+| decoy scramble | 6 | 12/24 = 50% |
+| partial solve | 17 | 2/24 = 8% |
+
+**The weak cell is the other arm's strong cell.** A cheat who stops before
+the last layer has a visibly unsolved cube at the timer stop, which is what
+§2.1 catches trivially. The two are complementary rather than competing.
+
+Not wired into `adjudicate()`. Seed 1 caches only 6 sessions — the 6 hardest
+for seed 0 — and on those both seeds give a median of 1.0, so the 54% is
+carried by the easier sessions and the statistic is dead on the hardest ones
+for *both* seeds. A fast path that collapses on the hard cases is a
+measurement, not yet an arm.
+
 ## 4. Camera injection
 
 Not addressed by any of the above and no cube analysis can address it. Every
@@ -301,11 +512,15 @@ so no recording can satisfy it. Not built.
 
 ## 5. Next
 
-1. Record the attack that survives the count gate — **enough moves, then
-   swap**, including the table-edge variant — and tune continuity and
-   appearance against it. Solver-following recordings are *not* a priority:
-   the scramble sessions are a structural proxy (21/21 caught) and the bound
-   on a solver's output is mathematical rather than empirical.
+1. Record the enough-moves-then-swap attack, including the table-edge
+   variant. The count gate cannot see it and §2.1 now covers it on a
+   *proxy*; a recorded attack is what turns that into a measurement. Note
+   what the proxy already establishes and what it does not: `*_scramble`
+   tails are genuinely "a cube that had real moves performed and is not
+   solved", so the solved-at-stop side is well proxied — the **custody** side
+   is not proxied at all and has never seen a real swap.
+   Solver-following recordings remain a non-priority: the scramble sessions
+   proxy that (21/21) and the bound on a solver's output is mathematical.
 2. Record real timer-stop-to-scan footage and calibrate the phantom rate.
 3. Wire `adjudicate()` into `verify_solve.py`'s live path and into the
    server-side re-verification worker (A3). The verdict function is pure and

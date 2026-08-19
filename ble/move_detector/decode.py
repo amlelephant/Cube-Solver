@@ -295,6 +295,56 @@ def align_sequences(truth: list[str], pred: list[str]) -> list[tuple]:
 # Handoff to the move classifier
 # ---------------------------------------------------------------------------
 
+def move_time(frame: int, fps: float, frame_times=None) -> float:
+    """
+    The `time` stamped on one decoded move: seconds from the stream's first
+    frame, on the real capture clock when the caller has one.
+
+    Lives here, next to window_from_anchor, because it is the same
+    distinction pointed at a different consumer: `frame_times` given is the
+    real clock, `frame_times` None is index arithmetic against one global
+    average fps. Every emitter of a moves list (live_detect.analyse,
+    joint_decode.posteriorgram_to_moves, ctc_decode.ctc_to_moves) calls
+    this, so there is one definition of what `time` means rather than three
+    copies that can drift.
+
+    WHY IT IS WORTH THREADING, measured — frame_time_audit.py, 76 prepared
+    sessions / 5811 intervals:
+
+        nominal-vs-real, per frame     up to 145 ms drift over a session
+        nominal-vs-real, per INTERVAL  9.2 ms median, 27.7 ms p95
+        under the 41 ms 30fps jitter floor on 74 / 76 sessions
+        worst session: 12.1% error on hesitation seconds, 9.9% on
+                       execution TPS, 5 pause-rule flips
+
+    The drift is common mode, so it cancels almost entirely under the
+    differencing every L1 coach metric does — which is why the typical case
+    is invisible. The tail is not: 12% on hesitation is the same order as
+    the evening-lighting error that already suppresses that metric, and it
+    would arrive with no regime flag attached to explain it.
+
+    THE REASON THIS SURVIVED AS LONG AS IT DID is worth keeping: the
+    offline harnesses (onset_timing / execution_tps / metric_robustness /
+    coach_report) all re-time onsets themselves from `frames.jsonl` via
+    onset_timing.frame_time_axis and never read this field. So the defect
+    could only ever bite the LIVE path, and no offline measurement could
+    see it. Anything measuring the coach offline is measuring the fixed
+    behaviour whether or not the fix is applied.
+
+    Relative to `frame_times[0]`, not absolute: capture stamps are epoch
+    seconds and every consumer treats `time` as an offset into the take.
+    TODO.md §7A's t=0 (the timer start) is a later re-basing the capture UI
+    owns; this only guarantees a consistent origin, not the product's one.
+    """
+    if frame_times is None:
+        return float(frame) / fps
+    ts = np.asarray(frame_times, dtype=np.float64)
+    if ts.size == 0:
+        return float(frame) / fps
+    i = int(np.clip(frame, 0, ts.size - 1))
+    return float(ts[i] - ts[0])
+
+
 def window_from_anchor(anchor: int, offsets: dict, fps: float, n_frames: int,
                        frame_times: np.ndarray | None = None
                        ) -> dict[str, int]:

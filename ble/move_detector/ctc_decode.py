@@ -46,6 +46,7 @@ verify_solve.py and verify_joint.py consume it without modification.
 
 import numpy as np
 
+from decode import move_time
 from reconstruct import WCA12
 
 BLANK = 12          # last column of the 13-way class head
@@ -194,7 +195,8 @@ def prefix_beam_decode(log_probs: np.ndarray, blank: int = BLANK,
 
 
 def ctc_to_moves(class_prob: np.ndarray, labels: list[int],
-                 frames: list[int], fps: float = 30.0) -> list[dict]:
+                 frames: list[int], fps: float = 30.0,
+                 frame_times=None) -> list[dict]:
     """
     (labels, frames) from either decoder -> the standard moves list.
 
@@ -204,13 +206,24 @@ def ctc_to_moves(class_prob: np.ndarray, labels: list[int],
     substitutions off the full distribution and flattening it here would
     throw away the only thing that lets the cube-state prior overrule a
     wrong call.
+
+    `frame_times` (seconds, one per frame, ascending, index-aligned with
+    `class_prob`) is the REAL capture clock and is preferred for `time`
+    whenever the caller has it. Without it `time` falls back to
+    `frame / fps`, where `fps` is a session mean — and webcam intervals
+    jitter around that mean, so the two clocks disagree.
+
+    See decode.move_time for the definition and for the measurement of how
+    much the two clocks differ (short version: it cancels under differencing
+    in the typical case and reaches 12% on hesitation seconds in the worst
+    session, so it is a tail fix rather than a correction to the headline).
     """
     moves = []
     for c, f in zip(labels, frames):
         row = class_prob[f, :12].astype(np.float64)
         total = row.sum()
         probs = (row / total) if total > 1e-9 else np.full(12, 1 / 12)
-        moves.append({"frame": int(f), "time": float(f) / fps,
+        moves.append({"frame": int(f), "time": move_time(f, fps, frame_times),
                       "move": WCA12[c], "conf": float(probs[c]),
                       "probs": [float(p) for p in probs],
                       "score": float(1.0 - class_prob[f, BLANK])})

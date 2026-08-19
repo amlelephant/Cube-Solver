@@ -1,0 +1,150 @@
+\section{Introduction}
+\label{sec:intro}
+
+\subsection{The problem}
+
+A speedcubing result is a claim: \emph{this person took a cube in this
+scrambled state and returned it to solved, unaided, in this many seconds}.
+In person, a judge validates the claim by watching. Online, there is no
+judge, and the natural substitute --- a smart cube that reports its own
+turns over Bluetooth --- validates nothing, because the thing reporting the
+turns is the thing under suspicion. A cube that can send a move stream can
+send a fabricated one.
+
+So the claim has to be decided from something the competitor does not
+control. The only such thing available to a consumer is the video of their
+own hands. This report is about the machinery for deciding it, and about the
+much narrower question of what that machinery has actually been shown to do.
+
+Concretely, the input is 30\,fps webcam video of a person solving a
+$3\times3\times3$ cube. The output we want is the sequence of quarter turns
+they performed, in order --- a string over a 12-symbol alphabet
+$\{\wca{U},\wca{U'},\wca{D},\wca{D'},\wca{L},\wca{L'},\wca{R},\wca{R'},
+\wca{F},\wca{F'},\wca{B},\wca{B'}\}$ --- together with a verdict on whether
+that sequence is consistent with a genuine solve.
+
+\subsection{Why this is not a standard video-recognition problem}
+
+Three properties make it its own thing, and each one drove a design choice
+that this report will defend or retract.
+
+\paragraph{The events are dense, brief, and never separated by rest.}
+A competent solve is 80--150 quarter turns in 30--60 seconds. In the corpus
+used here the median rate is \MedianTPS\ turns per second, and
+\CrowdedPctHoldout\% of adjacent turn pairs in the held-out solves land
+within two frames of each other at 30\,fps. There is no still moment between
+moves to segment on. Any method whose first step is ``find the boundaries of
+each move'' is fighting the data, and \cref{sec:peakpick} shows measurably
+that it loses.
+
+\paragraph{The label is cheap but subtly wrong.}
+A Bluetooth smart cube reports every turn it feels, timestamped. That is an
+enormous gift: free, dense supervision for a video model, with no human
+annotation at all. But the cube reports turns \emph{relative to its own
+core}, and a middle-slice turn rotates that core. After an \wca{M} the
+cube's idea of ``up'' has moved and the camera's has not, so every later
+label names a face that the camera never saw turn. This is a small effect
+(\SliceMoves\ moves corpus-wide) but it is a \emph{systematic} one, it was
+invisible to the repository's own consistency check for weeks, and
+\cref{sec:labelframe} shows it is still present in every evaluation harness
+in the repository other than the ones written for this report.
+
+\paragraph{The output space has algebraic structure, and the endpoints are
+known.} This is the property that makes the problem tractable at all. The
+$4.3\times 10^{19}$ cube states form a group; a move sequence is a word in
+that group; and we know both endpoints of the word --- the scramble (issued
+by the server, so known exactly) and the end state (solved, by claim). A
+recogniser with 90\% per-move accuracy over a 120-move solve gets the whole
+word right essentially never ($0.9^{120} \approx 3\times10^{-6}$). A decoder
+that searches for the \emph{cheapest edit of the recognised word that
+actually reaches solved} converts an impossible sequence-level problem into
+a tractable constrained one. \cref{sec:reconstruct} develops this and
+\cref{sec:decode-results} measures how much it buys, which is less than the
+framing suggests and for a reason worth understanding.
+
+\subsection{The pipeline in one paragraph}
+
+Frames are cropped to the cube by a YOLOv8 detector whose boxes are
+median-smoothed and interpolated across time, resized to $96\times96$, and
+stacked as four channels (RGB plus a signed luma difference from the
+previous frame). A shared-weight CNN encodes each frame to 128 dimensions; a
+four-block dilated temporal convolutional network with a 61-frame receptive
+field mixes them; a $1\times1$ convolution emits, per frame, a distribution
+over 12 quarter turns plus a CTC blank. The network is trained with a
+connectionist temporal classification loss, so it is never told \emph{when} a
+move happened, only which moves happened in what order. At inference a CTC
+prefix beam search reads a move string off the posteriorgram, and a second
+beam search over group elements edits that string --- substituting,
+deleting, inserting --- until it is a word that carries the known scramble to
+solved, at minimum cost under a probabilistic cost model.
+\cref{fig:pipeline} is the whole thing.
+
+\subsection{Contributions of this report}
+
+This is a study document, so the contributions are as much about
+\emph{measurement discipline} as about method.
+
+\begin{enumerate}[leftmargin=1.4em,itemsep=3pt]
+\item \textbf{A doubled, strictly-defined holdout.} The repository's headline
+numbers were computed on eight sessions, two of which were the checkpoints'
+own validation sessions. I prepared \NewlyPrepared\ additional never-seen
+sessions and defined the holdout programmatically from each checkpoint's own
+recorded training and validation lists. The honest held-out set is now
+\NHoldoutSolves\ free solves and \NHoldoutScrambles\ prescribed scrambles.
+\item \textbf{Corrected ground truth.} All evaluation here scores against
+the camera-frame move name, not the cube-frame one the smart cube reports
+(\cref{sec:labelframe}).
+\item \textbf{A single-holdout ablation ladder} over all five checkpoint
+generations (\cref{sec:ablation}), paired per session and tested, which is
+the first time the training changes have been comparable to each other. Two
+findings fall out. Speed augmentation --- introduced for an anticheat
+calibration reason and recorded in the repository as costing nothing --- is
+the largest and most significant accuracy intervention on record
+(\DSpeedAug\ points, $p$ \DSpeedAugP). And the CTC migration, the project's
+headline architectural change, is \DCtcVsPeak\ points with a confidence
+interval spanning zero.
+\item \textbf{A proximity ladder} (\cref{sec:ladder}) separating
+memorisation from generalisation: \LadderTrain\% on trained sessions,
+\LadderVal\% on same-day validation, \LadderHeld\% on genuinely unseen days.
+\item \textbf{A negative result on the group-theoretic decode}
+(\cref{sec:decode-results}): on this holdout it is worth \DecodeGain\ points
+and verifies \DecodeVerified\ of \DecodeTrials\ session-seed pairs. The
+repository reports ${\sim}+1.2$ points; the difference is entirely the
+holdout, and \cref{sec:decode-limits} explains why a two-point-harder test
+set collapses the contribution to zero.
+\item \textbf{A falsifiability sweep} (\cref{sec:falsifiability}) --- every
+claim re-decoded against deliberately false start states --- together with
+an argument for why its result here is \emph{uninformative} rather than
+reassuring, and a constructive bound showing a cheap wrong story provably
+exists even where the search does not find it.
+\item \textbf{A catalogue of negative results} (\cref{sec:negatives}). Nine
+interventions were measured and found flat or harmful. They are reported
+because a reader deciding what to try next needs them more than they need
+the positive results.
+\end{enumerate}
+
+\subsection{What this report does not claim}
+
+Stated here so it does not have to be re-hedged in every section.
+
+\begin{keybox}
+\textbf{One solver, one room, one cube.} Every session in the corpus is the
+same person, in one of two rooms, with the same cube. Nothing here
+establishes that the model generalises across people, cubes, or
+environments; \cref{sec:ladder} shows it degrades measurably across
+\emph{days} within one person, which is a lower bound on how much it would
+degrade across people.
+
+\smallskip
+\textbf{The attack side is a proxy, not an attack.} No adversary has ever
+tried to beat this system. The ``caught'' numbers in
+\cref{sec:anticheat-results} come from replaying prescribed scrambles, which
+are structurally similar to the attack of interest but were not produced by
+anybody trying to cheat.
+
+\smallskip
+\textbf{Verification and accuracy are different products.} The
+group-theoretic decoder makes the transcript more accurate. It does
+\emph{not} make a \texttt{VERIFIED} verdict trustworthy, and
+\cref{sec:falsifiability} shows exactly where it stops being evidence.
+\end{keybox}

@@ -1,0 +1,170 @@
+\section{Verification, and what a verdict is worth}
+\label{sec:verification}
+
+\subsection{The separation of concerns that took longest to get right}
+
+For most of this project's life, ``verify a solve'' meant ``reconstruct the
+move sequence exactly enough that it provably reaches solved''. That framing
+is wrong, and the reason is worth stating carefully because it is the
+conceptual core of the whole system.
+
+Reconstruction accuracy and legitimacy are different questions, and the
+first is a \emph{terrible} instrument for the second.
+
+\begin{keybox}
+\textbf{Verification is a cliff.} Empirically, sessions above ${\sim}98\%$
+raw per-move accuracy reconstruct exactly and verify; sessions in the 95--98\%
+band verify essentially never (0 of 4 in the recorded corpus). There is no
+graded middle. So a legitimacy test built on exact reconstruction rejects
+honest users for being filmed in slightly worse light --- it is a
+\emph{model-quality} test wearing a legitimacy test's clothes.
+\end{keybox}
+
+The system therefore splits into two tiers with different jobs:
+
+\begin{description}[leftmargin=1.2em,style=nextline,itemsep=3pt]
+\item[The accuracy tier (the group decode).] Makes the recorded transcript as
+close to what was performed as possible. Its output is a product feature
+(coaching, move-by-move review). It issues no verdicts.
+\item[The legitimacy tier (the count gate).] Decides
+\texttt{VERIFIED}/\texttt{REVIEW}/\texttt{REJECTED}. It uses only the
+\emph{number} of moves, never their identity.
+\end{description}
+
+\subsection{Falsifiability: the measurement that makes a verdict mean
+anything}
+\label{sec:falsifiability-method}
+
+A verifier that has only ever been run on genuine solves has not been
+evaluated. \texttt{VERIFIED} is not a result until you know what the same
+video says to a claim that is false.
+
+So every decode is re-run against deliberately wrong claims, under an
+\emph{identical} cost model: the same onsets, the same posteriors, the same
+beam, decoded against a start state that is 1, 2 or 4 quarter turns away
+from the truth, and against a cube that was never scrambled at all. A
+verifier that accepts these is worthless; one that rejects them has
+demonstrated something.
+
+\paragraph{And here is the part that must not be oversold.} Suppose the true
+claim decodes to word $W$ at cost $c(W)$. A claim whose start state is $d$
+quarter turns away from the truth is solved by the word $w^{-1}W$, where $w$
+is the offending $d$-move prefix. That word accepts exactly the same onsets
+as $W$ and additionally performs $d$ insertions. So a valid story for the
+false claim \textbf{provably exists} at cost
+\begin{equation}
+c(W) + d\cdot C_{\mathrm{ins}},
+\label{eq:decoybound}
+\end{equation}
+whether or not the beam finds it. When the system rejects a 1-move-off
+decoy, it is being rejected by the \emph{search}, not by the cost model,
+whose own separation is only $C_{\mathrm{ins}} = 4.0$ per quarter turn of
+claim error.
+
+This is not hypothetical. On one session the 1-move-off decoy is rejected at
+beam 4000 and at 16000, and \emph{accepted at beam 64000 at cost 10.17} ---
+exactly $6.17 + C_{\mathrm{ins}}$, the constructive bound. Operationally the
+system does reject near decoys at the deployed beam, which is what a
+verifier has to do; but reporting that as evidence that no cheap wrong story
+exists would be the easiest way to oversell this pipeline, and
+\cref{eq:decoybound} says one does.
+
+\subsection{The count gate}
+\label{sec:count-gate}
+
+\subsubsection{Threat model}
+
+Everything physical reduces to three attacks, and naming them this way
+matters because two of them are not swaps, so swap detection cannot see
+them.
+
+\begin{center}\small
+\begin{tabular}{@{}clp{7.6cm}@{}}
+\toprule
+& \textbf{Attack} & \textbf{What can catch it} \\
+\midrule
+A & Substitution --- swap in a solved cube
+  & move-count floor; frame-continuity guard; persistent appearance change \\
+B & Solving outside the timed window --- follow a solver's output, or stop
+    the timer unsolved and solve before scanning
+  & move-count floor; the post-stop phantom-rate test \\
+C & Video injection / virtual camera
+  & \emph{nothing in the video}; challenge--response only \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection{Why counting, and why the metric is the trap}
+
+Move-by-move verification is dead (the cliff above). But that cliff is about
+\emph{which} move. Counting discards substitutions entirely and is sensitive
+only to insertions and deletions, so it runs on the model's strong axis. MER
+is an over-estimate of counting error.
+
+Attack A is defeated trivially: a swapped-in solved cube requires zero moves.
+Attack B's first form is the interesting one --- run the scramble through a
+solver and execute the answer. Every move genuinely happens; one cube is on
+camera throughout; nothing is fake except the thinking.
+
+But a solver's output is \emph{bounded} and a human method is not. So the
+floor sits above the longest solution any solver would produce.
+
+\begin{keybox}
+\textbf{God's number is 20 in the half-turn metric. This alphabet has no
+half-turn symbol}, so \wca{R2} decodes as \wca{R},\wca{R} and everything
+here is quarter-turn metric, where God's number is \textbf{26}. A floor set
+at ``twenty-something'' would sit \emph{below} the cheat ceiling and catch
+nothing.
+\end{keybox}
+
+The operative ceiling is not 26 but 30: a cheat runs a two-phase solver, not
+an optimal one, and two-phase returns ${\sim}19$--$22$ HTM $\approx 25$--$30$
+QTM. The recorded scramble takes corroborate this at 20--28 QTM true.
+Constants: solver ceiling 30 QTM, floor on observed moves 32, assumed
+efficient-human floor 45 QTM.
+
+\subsubsection{Calibration, and the abstain band}
+
+The gate sees \emph{predicted} moves, and the model under-counts, more so the
+faster the solve. Under-counting pushes a cheat further below the floor
+(harmless) and a legit solve toward it (the false-DQ risk), so the floor must
+be calibrated against worst-case retention, not mean. Retention is measured
+by time-warping real sessions to a target turn rate and comparing decoded
+count to true count. Taking the \emph{worse} of the two seeds at each level:
+at 5\,turns/s retention is 0.88, at 8\,turns/s 0.80, at 10\,turns/s 0.69.
+
+Above some rate the two bands genuinely overlap and no threshold separates
+them. That limit is \emph{derived} from the floor rather than hardcoded, so
+changing the floor moves it automatically; speed augmentation moved it from
+7.11 to 9.62\,turns/s. At 9.62\,turns/s a 45-move solve takes 4.7\,s, against
+a ${\sim}3.1$\,s world record --- so the ``too fast to read'' abstain case now
+covers only the very fastest humans alive.
+
+\subsubsection{Three tiers, and the order of the checks}
+
+The gate returns \texttt{VERIFIED}, \texttt{REJECTED} or \texttt{REVIEW},
+unlike the frame-continuity guard which is deliberately two-tier. Two
+conditions here make the evidence \emph{unreadable} rather than
+incriminating: too fast to separate, and bad light. Bad light matters
+specifically because in low light the \emph{onset detector} loses 40+ points
+while the classifier loses ${\sim}5$ --- and the count \emph{is} the
+detector's output, so bad light would fabricate a ``too few moves'' rejection
+out of a model failure. Abstain conditions are therefore checked
+\textbf{before} reject conditions, so a solve is never rejected on evidence
+that has just been declared unreadable.
+
+\subsubsection{The hole that remains}
+
+Stated plainly, because it is easy to believe the gate closed more than it
+did. \textbf{Make a full solve's worth of plausible moves on camera without
+solving, then swap in a solved cube.} That reads as ${\sim}50$ moves, clears
+the floor of 32, and the count gate passes it --- eight seconds of flailing
+suffices, which would be a world-class time. Nothing about the move count
+distinguishes it from a real solve, because the move count is genuinely real;
+only the outcome is faked. Frame continuity and appearance own this case
+entirely, which is why the count gate can never be the only arm.
+
+Camera injection (attack C) is not addressed by any video analysis. The
+defence is protocol: server-issued unique scrambles mean a pre-recorded video
+cannot match a fresh challenge, plus challenge--response (demand a specific
+face at a random moment). Not built.

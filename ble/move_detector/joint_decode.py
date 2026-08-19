@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from decode import peak_pick, MIN_SEP
+from decode import peak_pick, move_time, MIN_SEP
 from reconstruct import WCA12
 from model import score_stream_joint
 from dataset import JointArrayStream, JointSessionStream
@@ -38,7 +38,8 @@ def posteriorgram_to_moves(onset_prob: np.ndarray, class_prob: np.ndarray,
                           min_sep: int = MIN_SEP,
                           fps: float = 30.0,
                           count_prob: np.ndarray | None = None,
-                          count_radius: int = 2) -> list[dict]:
+                          count_radius: int = 2,
+                          frame_times=None) -> list[dict]:
     """
     (T,) onset_prob, (T, 13) class_prob -> a moves list.
 
@@ -52,7 +53,12 @@ def posteriorgram_to_moves(onset_prob: np.ndarray, class_prob: np.ndarray,
 
     `fps` only feeds the "time" field (seconds from stream start) that
     live_detect.print_sequence reads on low-confidence moves — cosmetic,
-    not consumed by the decoder.
+    not consumed by the decoder. `frame_times`, when the caller has the
+    real capture clock, is preferred over it for that field; see
+    decode.move_time for the measurement of how much they differ and
+    why it matters in the tail rather than the middle. Since the coach's
+    L1 metrics are all differences of this field, "cosmetic" stopped being
+    true once those shipped.
 
     `count_prob` (optional, (T, 3) from a count-head checkpoint) enables
     peak SPLITTING — see split_peak. Without it this function behaves
@@ -72,7 +78,8 @@ def posteriorgram_to_moves(onset_prob: np.ndarray, class_prob: np.ndarray,
                 total = row.sum()
                 probs = (row / total) if total > 1e-9 else np.full(12, 1 / 12)
             cls = int(np.argmax(probs))
-            moves.append({"frame": frame, "time": float(frame) / fps,
+            moves.append({"frame": frame,
+                          "time": move_time(frame, fps, frame_times),
                           "move": WCA12[cls], "conf": float(probs[cls]),
                           "probs": [float(p) for p in probs],
                           "score": float(fg[frame])})
@@ -227,12 +234,19 @@ def live_posteriorgram(load_color, n_frames: int, fps: float, detector,
                                                             device)
     return {"onset_prob": onset_prob, "class_prob": class_prob,
             "count_prob": count_prob, "boxes": boxes, "cropped": cropped,
+            #: The cropped stream the model actually saw. Returned so the
+            #: lighting check can be run on THE SAME PIXELS rather than on
+            #: raw camera frames — lighting_check.assess explains why that
+            #: distinction is the difference between a working gate and one
+            #: that abstains on every take.
+            "stream_frames": frames,
             "t0": t0}
 
 
 def analyse_joint_live(load_color, n_frames: int, fps: float, detector,
                        model, device, threshold: float, min_sep: int,
-                       verbose: bool = True, count_radius: int = 2) -> dict:
+                       verbose: bool = True, count_radius: int = 2,
+                       frame_times=None) -> dict:
     """
     Live counterpart of live_detect.analyse() for the joint model: same
     capture -> crop -> score -> peak-pick shape verify_solve.py already
@@ -247,20 +261,21 @@ def analyse_joint_live(load_color, n_frames: int, fps: float, detector,
     moves = posteriorgram_to_moves(pg["onset_prob"], pg["class_prob"],
                                    threshold, min_sep, fps=fps,
                                    count_prob=pg["count_prob"],
-                                   count_radius=count_radius)
+                                   count_radius=count_radius,
+                                   frame_times=frame_times)
     if verbose:
         print(f"  joint model: {len(moves)} moves "
               f"({time.time()-pg['t0']:.1f}s total)")
 
     return {"scores": pg["onset_prob"], "moves": moves, "boxes": pg["boxes"],
            "class_names": WCA12, "cropped": pg["cropped"], "fps": fps,
-           "n_frames": n_frames}
+           "n_frames": n_frames, "stream_frames": pg["stream_frames"]}
 
 
 def analyse_ctc_live(load_color, n_frames: int, fps: float, detector,
                      model, device, beam: int = 16, lm=None,
                      alpha: float = 0.0, beta: float = 0.0,
-                     verbose: bool = True) -> dict:
+                     verbose: bool = True, frame_times=None) -> dict:
     """
     Live counterpart for the CTC arm (train_ctc.py): the same capture,
     crop and scoring as analyse_joint_live, then ctc_decode.
@@ -282,7 +297,8 @@ def analyse_ctc_live(load_color, n_frames: int, fps: float, detector,
     log_probs = np.log(np.maximum(class_prob, 1e-12))
     labels, frames = prefix_beam_decode(log_probs, beam=beam, lm=lm,
                                         alpha=alpha, beta=beta)
-    moves = ctc_to_moves(class_prob, labels, frames, fps=fps)
+    moves = ctc_to_moves(class_prob, labels, frames, fps=fps,
+                         frame_times=frame_times)
     if verbose:
         print(f"  CTC model: {len(moves)} moves, prefix beam {beam}"
               + (f" + LM (alpha {alpha}, beta {beta})" if lm is not None
@@ -291,4 +307,4 @@ def analyse_ctc_live(load_color, n_frames: int, fps: float, detector,
 
     return {"scores": pg["onset_prob"], "moves": moves, "boxes": pg["boxes"],
            "class_names": WCA12, "cropped": pg["cropped"], "fps": fps,
-           "n_frames": n_frames}
+           "n_frames": n_frames, "stream_frames": pg["stream_frames"]}

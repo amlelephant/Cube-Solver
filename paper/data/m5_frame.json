@@ -1,0 +1,7 @@
+{
+  "n_slice_holdout_sessions": 3,
+  "cube_mean": 0.8644376091744513,
+  "camera_mean": 0.8857788410419989,
+  "corpus_cube_mean": 0.8914263638097975,
+  "corpus_camera_mean": 0.895999484924272
+}

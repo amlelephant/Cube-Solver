@@ -1,0 +1,1434 @@
+[
+  {
+    "session": "solve_20260721_101219",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 83,
+    "floor": 32,
+    "solve_seconds": 54.02059197425842,
+    "tps": 1.54,
+    "headroom_moves": 51,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260721_102141",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 99,
+    "floor": 32,
+    "solve_seconds": 75.56822752952576,
+    "tps": 1.31,
+    "headroom_moves": 67,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260721_102432",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 137,
+    "floor": 32,
+    "solve_seconds": 78.34108853340149,
+    "tps": 1.75,
+    "headroom_moves": 105,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260721_102711",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 148,
+    "floor": 32,
+    "solve_seconds": 112.70074272155762,
+    "tps": 1.31,
+    "headroom_moves": 116,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260721_103149",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 91,
+    "floor": 32,
+    "solve_seconds": 79.60305047035217,
+    "tps": 1.14,
+    "headroom_moves": 59,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260721_103524",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 192,
+    "floor": 32,
+    "solve_seconds": 116.98210382461548,
+    "tps": 1.64,
+    "headroom_moves": 160,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260721_110339",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 105,
+    "floor": 32,
+    "solve_seconds": 79.9074170589447,
+    "tps": 1.31,
+    "headroom_moves": 73,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260721_110527",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 82,
+    "floor": 32,
+    "solve_seconds": 95.13610744476318,
+    "tps": 0.86,
+    "headroom_moves": 50,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260721_110811",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 71,
+    "floor": 32,
+    "solve_seconds": 92.09334897994995,
+    "tps": 0.77,
+    "headroom_moves": 39,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260722_100644",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 205,
+    "floor": 32,
+    "solve_seconds": 109.65424227714539,
+    "tps": 1.87,
+    "headroom_moves": 173,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260722_100959",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 222,
+    "floor": 32,
+    "solve_seconds": 92.51563906669617,
+    "tps": 2.4,
+    "headroom_moves": 190,
+    "retention_floor_at_tps": 0.938,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260722_101225",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 175,
+    "floor": 32,
+    "solve_seconds": 72.79814147949219,
+    "tps": 2.4,
+    "headroom_moves": 143,
+    "retention_floor_at_tps": 0.938,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260723_104750_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:28<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 28,
+    "floor": 32,
+    "solve_seconds": 42.35117864608765,
+    "tps": 0.66,
+    "headroom_moves": -4,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260723_104750_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 113,
+    "floor": 32,
+    "solve_seconds": 41.21905255317688,
+    "tps": 2.74,
+    "headroom_moves": 81,
+    "retention_floor_at_tps": 0.936,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260723_105530_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:24<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 24,
+    "floor": 32,
+    "solve_seconds": 37.35838603973389,
+    "tps": 0.64,
+    "headroom_moves": -8,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260723_105530_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 106,
+    "floor": 32,
+    "solve_seconds": 58.028040409088135,
+    "tps": 1.83,
+    "headroom_moves": 74,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260724_094947_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:26<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 26,
+    "floor": 32,
+    "solve_seconds": 43.77977752685547,
+    "tps": 0.59,
+    "headroom_moves": -6,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260724_094947_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 71,
+    "floor": 32,
+    "solve_seconds": 51.5573947429657,
+    "tps": 1.38,
+    "headroom_moves": 39,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260724_095506_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:22<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 22,
+    "floor": 32,
+    "solve_seconds": 37.84452414512634,
+    "tps": 0.58,
+    "headroom_moves": -10,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260724_095506_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 128,
+    "floor": 32,
+    "solve_seconds": 59.761786222457886,
+    "tps": 2.14,
+    "headroom_moves": 96,
+    "retention_floor_at_tps": 0.94,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260724_100120_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:22<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 22,
+    "floor": 32,
+    "solve_seconds": 29.478549242019653,
+    "tps": 0.75,
+    "headroom_moves": -10,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260724_100120_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 132,
+    "floor": 32,
+    "solve_seconds": 56.048826456069946,
+    "tps": 2.36,
+    "headroom_moves": 100,
+    "retention_floor_at_tps": 0.939,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260724_101131_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:20<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 20,
+    "floor": 32,
+    "solve_seconds": 29.184760570526123,
+    "tps": 0.69,
+    "headroom_moves": -12,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260724_101131_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 123,
+    "floor": 32,
+    "solve_seconds": 61.7947313785553,
+    "tps": 1.99,
+    "headroom_moves": 91,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260724_102119_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:22<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 22,
+    "floor": 32,
+    "solve_seconds": 27.024904489517212,
+    "tps": 0.81,
+    "headroom_moves": -10,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260724_102119_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 133,
+    "floor": 32,
+    "solve_seconds": 66.22871947288513,
+    "tps": 2.01,
+    "headroom_moves": 101,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260724_103307_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:22<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 22,
+    "floor": 32,
+    "solve_seconds": 34.81885123252869,
+    "tps": 0.63,
+    "headroom_moves": -10,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260724_103307_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 96,
+    "floor": 32,
+    "solve_seconds": 44.87795853614807,
+    "tps": 2.14,
+    "headroom_moves": 64,
+    "retention_floor_at_tps": 0.94,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260724_134516_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:20<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 20,
+    "floor": 32,
+    "solve_seconds": 34.142905712127686,
+    "tps": 0.59,
+    "headroom_moves": -12,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260724_134516_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 119,
+    "floor": 32,
+    "solve_seconds": 52.7830593585968,
+    "tps": 2.25,
+    "headroom_moves": 87,
+    "retention_floor_at_tps": 0.939,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260725_134032_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:20<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 20,
+    "floor": 32,
+    "solve_seconds": 34.05010533332825,
+    "tps": 0.59,
+    "headroom_moves": -12,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260725_134032_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 111,
+    "floor": 32,
+    "solve_seconds": 44.33702516555786,
+    "tps": 2.5,
+    "headroom_moves": 79,
+    "retention_floor_at_tps": 0.937,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260725_134744_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:20<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 20,
+    "floor": 32,
+    "solve_seconds": 29.298301458358765,
+    "tps": 0.68,
+    "headroom_moves": -12,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260725_134744_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 135,
+    "floor": 32,
+    "solve_seconds": 51.88858413696289,
+    "tps": 2.6,
+    "headroom_moves": 103,
+    "retention_floor_at_tps": 0.937,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260725_180216_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:20<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 20,
+    "floor": 32,
+    "solve_seconds": 35.474021673202515,
+    "tps": 0.56,
+    "headroom_moves": -12,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260725_180216_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 134,
+    "floor": 32,
+    "solve_seconds": 54.3683500289917,
+    "tps": 2.46,
+    "headroom_moves": 102,
+    "retention_floor_at_tps": 0.938,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260726_100142_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:20<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 20,
+    "floor": 32,
+    "solve_seconds": 26.944014072418213,
+    "tps": 0.74,
+    "headroom_moves": -12,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260726_100142_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 78,
+    "floor": 32,
+    "solve_seconds": 39.00610947608948,
+    "tps": 2.0,
+    "headroom_moves": 46,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260726_165044_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:22<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 22,
+    "floor": 32,
+    "solve_seconds": 32.608166217803955,
+    "tps": 0.67,
+    "headroom_moves": -10,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260726_165044_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 100,
+    "floor": 32,
+    "solve_seconds": 45.36137866973877,
+    "tps": 2.2,
+    "headroom_moves": 68,
+    "retention_floor_at_tps": 0.94,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260728_233139_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:20<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 20,
+    "floor": 32,
+    "solve_seconds": 24.5788996219635,
+    "tps": 0.81,
+    "headroom_moves": -12,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260728_233139_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 120,
+    "floor": 32,
+    "solve_seconds": 52.164262771606445,
+    "tps": 2.3,
+    "headroom_moves": 88,
+    "retention_floor_at_tps": 0.939,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260729_221809_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:19<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 19,
+    "floor": 32,
+    "solve_seconds": 26.702454566955566,
+    "tps": 0.71,
+    "headroom_moves": -13,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260729_221809_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 146,
+    "floor": 32,
+    "solve_seconds": 52.158164501190186,
+    "tps": 2.8,
+    "headroom_moves": 114,
+    "retention_floor_at_tps": 0.935,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260730_111941_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:19<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 19,
+    "floor": 32,
+    "solve_seconds": 29.295923471450806,
+    "tps": 0.65,
+    "headroom_moves": -13,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260730_111941_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 104,
+    "floor": 32,
+    "solve_seconds": 48.769954681396484,
+    "tps": 2.13,
+    "headroom_moves": 72,
+    "retention_floor_at_tps": 0.94,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260730_113054_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:20<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 20,
+    "floor": 32,
+    "solve_seconds": 32.10652565956116,
+    "tps": 0.62,
+    "headroom_moves": -12,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260730_113054_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 128,
+    "floor": 32,
+    "solve_seconds": 51.44117522239685,
+    "tps": 2.49,
+    "headroom_moves": 96,
+    "retention_floor_at_tps": 0.938,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260731_211018_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:20<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 20,
+    "floor": 32,
+    "solve_seconds": 28.755969524383545,
+    "tps": 0.7,
+    "headroom_moves": -12,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260731_211018_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 71,
+    "floor": 32,
+    "solve_seconds": 37.40205907821655,
+    "tps": 1.9,
+    "headroom_moves": 39,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260731_213559_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:20<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 20,
+    "floor": 32,
+    "solve_seconds": 34.89078950881958,
+    "tps": 0.57,
+    "headroom_moves": -12,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260731_213559_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 105,
+    "floor": 32,
+    "solve_seconds": 40.49981904029846,
+    "tps": 2.59,
+    "headroom_moves": 73,
+    "retention_floor_at_tps": 0.937,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260802_102514_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:20<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 20,
+    "floor": 32,
+    "solve_seconds": 25.244242668151855,
+    "tps": 0.79,
+    "headroom_moves": -12,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260802_102514_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 127,
+    "floor": 32,
+    "solve_seconds": 45.39290428161621,
+    "tps": 2.8,
+    "headroom_moves": 95,
+    "retention_floor_at_tps": 0.935,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260802_103334_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:20<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 20,
+    "floor": 32,
+    "solve_seconds": 25.74229121208191,
+    "tps": 0.78,
+    "headroom_moves": -12,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260802_103334_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 104,
+    "floor": 32,
+    "solve_seconds": 39.08923268318176,
+    "tps": 2.66,
+    "headroom_moves": 72,
+    "retention_floor_at_tps": 0.936,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260802_124134_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:20<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 20,
+    "floor": 32,
+    "solve_seconds": 31.367691278457638,
+    "tps": 0.64,
+    "headroom_moves": -12,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260802_124134_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 111,
+    "floor": 32,
+    "solve_seconds": 38.001286029815674,
+    "tps": 2.92,
+    "headroom_moves": 79,
+    "retention_floor_at_tps": 0.935,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": true,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260803_095124_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:22<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 22,
+    "floor": 32,
+    "solve_seconds": 33.6968560218811,
+    "tps": 0.65,
+    "headroom_moves": -10,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260803_095124_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 77,
+    "floor": 32,
+    "solve_seconds": 35.326868534088135,
+    "tps": 2.18,
+    "headroom_moves": 45,
+    "retention_floor_at_tps": 0.94,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260803_095533_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:19<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 19,
+    "floor": 32,
+    "solve_seconds": 33.075716972351074,
+    "tps": 0.57,
+    "headroom_moves": -13,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260803_095533_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 122,
+    "floor": 32,
+    "solve_seconds": 61.57951617240906,
+    "tps": 1.98,
+    "headroom_moves": 90,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260803_100135_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:19<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 19,
+    "floor": 32,
+    "solve_seconds": 25.574578046798706,
+    "tps": 0.74,
+    "headroom_moves": -13,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260803_100135_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 113,
+    "floor": 32,
+    "solve_seconds": 48.56368064880371,
+    "tps": 2.33,
+    "headroom_moves": 81,
+    "retention_floor_at_tps": 0.939,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260803_122920_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:22<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 22,
+    "floor": 32,
+    "solve_seconds": 38.16374182701111,
+    "tps": 0.58,
+    "headroom_moves": -10,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260803_122920_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 122,
+    "floor": 32,
+    "solve_seconds": 44.78453278541565,
+    "tps": 2.72,
+    "headroom_moves": 90,
+    "retention_floor_at_tps": 0.936,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260803_123410_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:22<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 22,
+    "floor": 32,
+    "solve_seconds": 34.25553512573242,
+    "tps": 0.64,
+    "headroom_moves": -10,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260803_123410_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 89,
+    "floor": 32,
+    "solve_seconds": 33.82318997383118,
+    "tps": 2.63,
+    "headroom_moves": 57,
+    "retention_floor_at_tps": 0.937,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260804_214215_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:18<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 18,
+    "floor": 32,
+    "solve_seconds": 31.279260635375977,
+    "tps": 0.58,
+    "headroom_moves": -14,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260804_214215_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 103,
+    "floor": 32,
+    "solve_seconds": 54.088199853897095,
+    "tps": 1.9,
+    "headroom_moves": 71,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260804_234927_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:18<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 18,
+    "floor": 32,
+    "solve_seconds": 28.560521841049194,
+    "tps": 0.63,
+    "headroom_moves": -14,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260804_234927_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 83,
+    "floor": 32,
+    "solve_seconds": 40.13110947608948,
+    "tps": 2.07,
+    "headroom_moves": 51,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260805_155829_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:20<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 20,
+    "floor": 32,
+    "solve_seconds": 31.37560510635376,
+    "tps": 0.64,
+    "headroom_moves": -12,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260805_155829_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 122,
+    "floor": 32,
+    "solve_seconds": 50.36429738998413,
+    "tps": 2.42,
+    "headroom_moves": 90,
+    "retention_floor_at_tps": 0.938,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "solve"
+  },
+  {
+    "session": "solve_20260809_155709_scramble",
+    "verdict": "rejected",
+    "reject_reasons": [
+      "too_few_moves:19<32 (solver_following)"
+    ],
+    "review_reasons": [],
+    "observed_moves": 19,
+    "floor": 32,
+    "solve_seconds": 26.717317581176758,
+    "tps": 0.71,
+    "headroom_moves": -13,
+    "retention_floor_at_tps": 0.941,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "scramble_proxy"
+  },
+  {
+    "session": "solve_20260809_155709_solve",
+    "verdict": "verified",
+    "reject_reasons": [],
+    "review_reasons": [],
+    "observed_moves": 78,
+    "floor": 32,
+    "solve_seconds": 29.450613260269165,
+    "tps": 2.65,
+    "headroom_moves": 46,
+    "retention_floor_at_tps": 0.936,
+    "implied_true_floor": 35,
+    "caveats": [
+      "post-stop phantom rate extrapolated off 1-3s tails; needs real timer-stop-to-scan-complete footage"
+    ],
+    "seen_in_training": false,
+    "role": "solve"
+  }
+]

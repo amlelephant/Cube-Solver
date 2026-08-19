@@ -53,7 +53,14 @@ from onset_timing import frame_time_axis
 #: all — the earlier onset-timing run found 0 pauses in all three, and
 #: their median IOI is 5-10x a solve's. Including them would drag every
 #: aggregate here toward a regime the coach never analyses.
-SKIP_SUFFIX = "_scramble"
+#: Session name suffixes that are NOT solves and must never be scored as
+#: one. `_scan` is verify_solve.py phase 3 - the post-timer verification
+#: window, which is deliberately move-free; counted as a solve it would
+#: read as a legitimate attempt with ~0 moves and drag every aggregate
+#: here down. Suffix classification is load-bearing, so it lives in one
+#: tuple per file rather than in an inline endswith().
+SKIP_SUFFIXES = ("_scramble", "_scan")
+SKIP_SUFFIX = SKIP_SUFFIXES[0]   # kept: existing single-suffix callers
 
 
 def decoded_onsets(d: Path, model, device, tag: str, beam: int,

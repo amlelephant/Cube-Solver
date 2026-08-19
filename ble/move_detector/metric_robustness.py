@@ -54,15 +54,23 @@ import numpy as np
 import torch
 
 from algorithm_gate import posteriorgram
-from coach.moves import FACES, move_report
-from coach.timing import bursts, inter_onset, pause_threshold, timing_report
+from coach.moves import AWKWARD_FACES, FACES, move_report
+from coach.timing import (TPS_CURVE_K, bursts, inter_onset, pause_threshold,
+                          timing_report, tps_curve_at)
 from ctc_decode import prefix_beam_decode
 from eval_lighting import DAY_END, DAY_START, held_out_sessions, take_hour
 from model import build_joint_from_ckpt
 from onset_timing import frame_time_axis
 from reconstruct import WCA12
 
-SKIP_SUFFIX = "_scramble"
+#: Session name suffixes that are NOT solves and must never be scored as
+#: one. `_scan` is verify_solve.py phase 3 - the post-timer verification
+#: window, which is deliberately move-free; counted as a solve it would
+#: read as a legitimate attempt with ~0 moves and drag every aggregate
+#: here down. Suffix classification is load-bearing, so it lives in one
+#: tuple per file rather than in an inline endswith().
+SKIP_SUFFIXES = ("_scramble", "_scan")
+SKIP_SUFFIX = SKIP_SUFFIXES[0]   # kept: existing single-suffix callers
 
 #: metric -> what it needs. Drives the grouping in the report, and is the
 #: part that generalises beyond this specific list.
@@ -92,6 +100,7 @@ NEEDS = {
     "half_turn_rate": "order",
     "distinct_face_runs": "order",
     "moves_per_face_run": "order",
+    "tps_curve": "timing",
 }
 
 #: What KIND of statistic it is — and this, not `NEEDS`, turned out to be
@@ -129,7 +138,17 @@ STAT_KIND = {
     "slowdown_ratio": "ratio",
     "same_face_pair_rate": "local", "half_turn_rate": "local",
     "distinct_face_runs": "local",
+    #: Each POINT of the curve is a mean over its k-move window, which is
+    #: why the curve is shippable where `slowdown_ratio` — the same signal
+    #: squeezed into one ratio — is not. Scored pointwise on a shared time
+    #: grid; see compare().
+    "tps_curve": "mean",
 }
+
+#: Points at which two TPS curves are compared. Evenly spaced across the
+#: overlapping span rather than per-window, because truth and decode disagree
+#: about how many windows there are — they share a wall clock, not an index.
+TPS_CURVE_GRID = 24
 
 
 def battery(times: np.ndarray, labels: list[int]) -> dict:
@@ -181,12 +200,30 @@ def battery(times: np.ndarray, labels: list[int]) -> dict:
     out["ccw_fraction"] = mv["ccw_fraction"]
     out["top_face_share"] = mv["top_face_share"]
     out["easy_face_fraction"] = mv["easy_face_fraction"]
-    out["awkward_face_fraction"] = mv["awkward_face_fraction"]
+    # Computed HERE rather than read off move_report, because it is a
+    # REJECTED candidate: coach/moves.py cut it (5.6% median daytime but
+    # 30.5% worst, 26-42% evening) and correctly does not return it any
+    # more. This harness still has to be able to measure it — a rejection
+    # that cannot be re-checked on a new corpus is a rejection nobody can
+    # revisit — so the candidate lives on this side of the boundary.
+    #
+    # It reading `mv["awkward_face_fraction"]` is what broke this file when
+    # the metric was cut on 2026-08-06: every session raised KeyError and
+    # was caught by score_session's blanket `except Exception ... skipped`,
+    # so the run printed a skip line per session and "Nothing scored" and
+    # nobody noticed the gate-filler had stopped working. The lesson is the
+    # broad except, not the key: it turned a hard failure into a quiet one.
+    out["awkward_face_fraction"] = round(
+        sum(mv["face_share"][f] for f in AWKWARD_FACES), 4)
     out["face_entropy"] = mv["face_entropy"]
     out["moves_per_face_run"] = mv["moves_per_face_run"]
     #: Stashed so the L1 distance below can be computed against the other
     #: stream rather than against a constant.
     out["_face_share"] = [mv["face_share"][f] for f in FACES]
+    #: Same idea for the TPS curve: it is not a scalar, so it cannot be
+    #: relativised on its own and is compared against the other stream in
+    #: compare(). Underscore = "not a metric, an input to one".
+    out["_onset_times"] = t
 
     # -- order -------------------------------------------------------------
     # Adjacent-pair structure. Same face twice in a row is either a half
@@ -220,6 +257,24 @@ def compare(truth: dict, pred: dict) -> dict:
         # relativised.
         err["face_share_L1"] = float(np.abs(np.array(ts)
                                             - np.array(ps)).sum() / 2)
+
+    # The TPS curve, scored the only way a curve can be: resample both onto
+    # one shared time grid and take the MEDIAN relative disagreement across
+    # it. Median rather than mean over the grid deliberately — the ends of
+    # the curve are where a single missed move at the very start or finish
+    # moves a window hardest, and a mean would let those two points speak
+    # for the whole solve. The reported number is what a user reading the
+    # middle of the chart actually meets.
+    tt, pt = truth.get("_onset_times"), pred.get("_onset_times")
+    if tt is not None and pt is not None:
+        lo = max(float(tt[0]), float(pt[0]))
+        hi = min(float(tt[-1]), float(pt[-1]))
+        if hi > lo:
+            grid = np.linspace(lo, hi, TPS_CURVE_GRID)
+            a = tps_curve_at(tt, grid, TPS_CURVE_K)
+            b = tps_curve_at(pt, grid, TPS_CURVE_K)
+            if a is not None and b is not None and np.all(a > 0):
+                err["tps_curve"] = float(np.median(np.abs((b - a) / a)))
     return err
 
 
@@ -346,6 +401,13 @@ def main():
     for d in dirs:
         try:
             r = score_session(d, model, device, tag, args.beam, args.refresh)
+        except (KeyError, AttributeError, NameError, TypeError):
+            # A bug in this file, not a bad session — every session will hit
+            # it identically. Swallowing these is what let the harness sit
+            # broken (see battery()'s awkward_face_fraction note): the run
+            # still exited 0 and printed a tidy per-session skip line.
+            # Data problems below are per-session and are still tolerated.
+            raise
         except Exception as exc:                       # noqa: BLE001
             print(f"  {d.name}: {type(exc).__name__}: {exc} — skipped")
             continue

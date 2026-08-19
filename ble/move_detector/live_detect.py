@@ -59,7 +59,8 @@ if str(_BLE_DIR) not in sys.path:
 from dataset import ArrayStream                                # noqa: E402
 from model import build_model, score_stream                    # noqa: E402
 from decode import (peak_pick, onset_windows, match_onsets,    # noqa: E402
-                    format_metrics, align_sequences, MIN_SEP, TOLERANCE)
+                    format_metrics, align_sequences, move_time,
+                    MIN_SEP, TOLERANCE)
 from prepare_data import (per_frame_boxes, build_gray_stream,   # noqa: E402
                           crop_to_box, center_square)
 from train_move_classifier import (FRAME_ORDER, predict_probs,  # noqa: E402
@@ -202,13 +203,16 @@ def analyse(load_color, n_frames: int, fps: float, detector, det_model,
 
     `frame_times` is the capture timestamp of each frame, in seconds and
     ascending — index-aligned with what `load_color` returns, so a resampled
-    stream must pass the RESAMPLED timeline. It lets the classifier windows
-    be carved the way postprocess_session.py carved the training ones
-    (nearest frame in time) instead of by index arithmetic against a global
-    mean fps. Measured effect on accuracy: +0.3 points, NOT significant —
-    see decode.window_from_anchor for why the real residual is the anchor
-    rather than the frame selection. Omitting it degrades to the legacy
-    behaviour.
+    stream must pass the RESAMPLED timeline. It does two things. It lets the
+    classifier windows be carved the way postprocess_session.py carved the
+    training ones (nearest frame in time) instead of by index arithmetic
+    against a global mean fps — measured effect on accuracy +0.3 points, NOT
+    significant, see decode.window_from_anchor for why the real residual is
+    the anchor rather than the frame selection. And it is the clock each
+    move's `time` field is stamped from, which is the half that reaches the
+    coach: every L1 metric is a difference of those stamps
+    (ctc_decode._move_time). Omitting it degrades to the legacy behaviour on
+    both counts.
 
     `peak_threshold`, when given (and lower than `threshold`), is used for
     peak-picking INSTEAD of `threshold` — it widens the onset list to
@@ -280,7 +284,7 @@ def analyse(load_color, n_frames: int, fps: float, detector, det_model,
             continue
         probs, class_names = predict_probs(frames, classifier)
         cls = int(np.argmax(probs))
-        moves.append({"frame": int(o), "time": float(o / fps),
+        moves.append({"frame": int(o), "time": move_time(o, fps, frame_times),
                       "move": class_names[cls], "conf": float(probs[cls]),
                       "probs": [float(p) for p in probs],
                       "score": float(scores[o]),
@@ -511,7 +515,8 @@ def report_scramble(truth: list[str], moves: list[dict],
 
 def capture(camera: int, preview_every: int = 2,
             overlay: list[str] | None = None,
-            status_fn=None) -> tuple[list, np.ndarray]:
+            status_fn=None, max_seconds: float | None = None,
+            cap_reason: str = "") -> tuple[list, np.ndarray]:
     """
     Buffer JPEG-encoded frames from the webcam. Returns (frames, timestamps).
 
@@ -535,6 +540,18 @@ def capture(camera: int, preview_every: int = 2,
     show its move count live: a cube that silently stopped reporting and a
     cube that is reporting fine look identical until the take is over and
     the truth is empty, which is an expensive way to find out.
+
+    `max_seconds` HARD-STOPS the recording when it elapses, with a visible
+    countdown from 15s out. It exists for one caller and one reason: the
+    post-timer verification scan is capped at
+    anticheat_gate.POST_STOP_MAX_WINDOW_S, because the phantom allowance in
+    that window grows at 0.4 moves/s while a real hidden solve reads >=32,
+    so past ~90s the allowance swallows an entire solve and the test
+    provably has no power left. The gate ABSTAINS rather than passing when
+    the window overruns, so an uncapped UI does not create a security hole —
+    it silently converts every VERIFIED into a REVIEW. Enforcing the cap
+    here is what stops that being discovered in production. `cap_reason` is
+    shown next to the countdown so the constraint explains itself on screen.
     """
     import queue
     import threading
@@ -569,8 +586,16 @@ def capture(camera: int, preview_every: int = 2,
     thread.start()
 
     recording, dropped, shown = False, 0, 0
+    hit_cap = False
+    # Separate from `recent`, which is a 45-frame ring used for the LIVE fps
+    # readout. Elapsed time cannot come from `recent[0]` — that is only ~1.5s
+    # ago — and reading it from there is what made the REC counter sit at
+    # "1s" for a whole take regardless of length.
+    t_rec_start: float | None = None
     recent: list[float] = []
-    print("\n  SPACE = start/stop recording    Q = quit\n")
+    print("\n  SPACE = start/stop recording    Q = quit"
+          + (f"    (auto-stops at {max_seconds:.0f}s)" if max_seconds else "")
+          + "\n")
 
     while True:
         ok, frame = cap.read()
@@ -587,6 +612,12 @@ def capture(camera: int, preview_every: int = 2,
             recent.append(now)
             if len(recent) > 45:
                 recent.pop(0)
+            if max_seconds is not None and t_rec_start is not None \
+                    and now - t_rec_start >= max_seconds:
+                # Stop AFTER buffering this frame, so the window is at least
+                # as long as the cap rather than one frame short of it.
+                hit_cap = True
+                break
 
         shown += 1
         if shown % preview_every == 0:
@@ -596,18 +627,32 @@ def capture(camera: int, preview_every: int = 2,
                             if len(recent) > 1 and recent[-1] > recent[0] else 0)
                 warn = live_fps < 28
                 col = (0, 165, 255) if warn else (255, 255, 255)
+                elapsed = now - t_rec_start if t_rec_start else 0.0
                 cv2.circle(disp, (28, 30), 11, (0, 0, 220), -1)
-                cv2.putText(disp, f"REC  {len(buf)}f  "
-                                  f"{now - recent[0] if recent else 0:.0f}s  "
+                cv2.putText(disp, f"REC  {len(buf)}f  {elapsed:.0f}s  "
                                   f"{live_fps:.0f}fps",
                             (48, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.7, col, 2,
                             cv2.LINE_AA)
+                y = 64
                 if warn:
                     cv2.putText(disp, "LOW FPS - moves will be missed",
-                                (48, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                (48, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                                 (0, 165, 255), 1, cv2.LINE_AA)
+                    y += 20
+                if max_seconds is not None:
+                    left = max(0.0, max_seconds - elapsed)
+                    # Silent until the last 15s: a countdown running for the
+                    # whole window would read as a deadline on the SOLVE,
+                    # which is the one thing this must not imply.
+                    if left <= 15.0:
+                        cv2.putText(disp, f"{left:4.1f}s left"
+                                    + (f" - {cap_reason}" if cap_reason else ""),
+                                    (48, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                    (0, 165, 255) if left > 5 else (0, 60, 255),
+                                    1, cv2.LINE_AA)
+                        y += 20
                 if status_fn is not None:
-                    cv2.putText(disp, status_fn(), (48, 84 if warn else 64),
+                    cv2.putText(disp, status_fn(), (48, y),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                                 (120, 255, 120), 1, cv2.LINE_AA)
             else:
@@ -640,6 +685,7 @@ def capture(camera: int, preview_every: int = 2,
             stamps.clear()
             recent.clear()
             recording = True
+            t_rec_start = now
         elif key in (ord("q"), 27):
             buf.clear()
             break
@@ -652,6 +698,10 @@ def capture(camera: int, preview_every: int = 2,
     if dropped:
         print(f"  WARNING: {dropped} frame(s) dropped — the encoder could "
               f"not keep up.")
+    if hit_cap:
+        print(f"  Recording stopped automatically at the {max_seconds:.0f}s "
+              f"cap"
+              + (f" — {cap_reason}." if cap_reason else "."))
     return list(buf), np.array(stamps, dtype=np.float64)
 
 

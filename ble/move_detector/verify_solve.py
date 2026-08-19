@@ -182,10 +182,19 @@ if str(_BLE_DIR) not in sys.path:
     sys.path.insert(0, str(_BLE_DIR))
 import win_compat  # noqa: F401,E402
 
+# The anticheat half of this script needs the continuity guard and the
+# solved-at-stop check, which live in cv/detection (CLAUDE.md's cross-topic
+# bootstrap convention — same one live_anticheat.py uses).
+_DETECTION_DIR = Path(__file__).resolve().parents[2] / "cv" / "detection"
+if str(_DETECTION_DIR) not in sys.path:
+    sys.path.insert(0, str(_DETECTION_DIR))
+
 import numpy as np  # noqa: E402
 
 import live_detect as LD  # noqa: E402
 import reconstruct as RC  # noqa: E402
+from anticheat_gate import (  # noqa: E402
+    POST_STOP_MAX_WINDOW_S as AG_POST_STOP_MAX_WINDOW_S)
 from decode import MIN_SEP  # noqa: E402
 
 # How far off a claimed start state has to be before the verifier rejects
@@ -673,6 +682,177 @@ def load_ctc_stack(args):
 
 
 # ---------------------------------------------------------------------------
+# Anticheat — the verdict the SERVER will reach, on the same take
+# ---------------------------------------------------------------------------
+#
+# The reconstruction verdict above answers "is there a consistent story".
+# That is a different question from "should this count", and the second one
+# is `anticheat_gate.adjudicate()`. Wiring it in here rather than leaving it
+# to `live_anticheat.py` costs one extra recording and buys the thing
+# neither program had on its own: ONE sitting that produces both verdicts on
+# the SAME frames, so a disagreement between them is attributable.
+#
+# adjudicate() is a pure function over plain data precisely so the client and
+# the server can both run it and agree. Everything assembled below is
+# therefore plain data: counts, seconds and dicts, no models and no handles.
+#
+# THE TWO INPUTS A CALLER MUST NOT OMIT are `solved_at_stop` and
+# `post_stop_continuity`. They are the only arm covering the
+# enough-moves-then-swap attack (make a full solve's worth of real moves
+# without solving, then substitute a solved cube), and adjudicate() treats
+# both as "not assessed" when absent — which passes silently. That is why
+# this file records a post-timer scan window at all.
+
+#: Frames either side of the timer stop fed to solved_check.solved_at.
+#: ~0.7s a side at 30fps, matching the 1.5s window solved_check.py's
+#: thresholds were measured over. Coupled to that calibration: change it and
+#: `solved_check.py sweep` has to be re-run.
+STOP_WINDOW_FRAMES = 20
+
+#: Capture rate is a temporal scale factor on the move count (the model's
+#: receptive field is measured in FRAMES), so a run far off 30fps is
+#: measuring the mismatch rather than the solve. Same constants as
+#: live_anticheat.py, deliberately.
+TRAIN_FPS = 30.0
+FPS_TOLERANCE = 0.25
+
+
+def _guard_over(src, fw, fh, label):
+    """ContinuityGuard report over one recorded window.
+
+    Post-hoc rather than live, and that is not a shortcut: the guard is a
+    pure function of (t, boxes, sig), so replaying buffered frames with
+    their REAL capture timestamps reaches the verdict a live pass would
+    have — and, unlike a live pass, the server can reproduce it from the
+    stored bundle, which is the property the whole design rests on.
+    """
+    import continuity_guard as CG
+    load_color, n, _fps, _window, ftimes = src
+    print(f"  continuity ({label}): {n} frames...")
+    guard = CG.run_guard(((i, load_color(i)) for i in range(n)),
+                         fw, fh, times=ftimes)
+    return guard.report()
+
+
+def _solved_at_stop(solve_src, scan_src, detector):
+    """Was the cube solved when the timer stopped? (solved_check.solved_at)
+
+    The window STRADDLES the stop — tail of the timed take plus head of the
+    scan — rather than starting at it. The stop frame itself is the worst
+    one available (a hand is leaving the cube for the keyboard), and a
+    one-sided window answers a subtly different question: before the stop is
+    "did they finish", after it is "what are they presenting", and the
+    attack lives exactly in the seam.
+    """
+    from solved_check import solved_at
+
+    if detector is None:
+        return {"solved": None, "reason": "no_detector", "n_regions": None}
+    s_load, s_n, _f, _w, _t = solve_src
+    c_load, c_n, _f2, _w2, _t2 = scan_src
+    pre = [s_load(i) for i in range(max(0, s_n - STOP_WINDOW_FRAMES), s_n)]
+    post = [c_load(i) for i in range(min(STOP_WINDOW_FRAMES, c_n))]
+    frames = [f for f in pre + post if f is not None]
+    if len(frames) < 8:
+        return {"solved": None, "reason": "too_few_frames",
+                "n_regions": None, "n_frames": len(frames)}
+
+    from prepare_data import per_frame_boxes
+    n = len(frames)
+    boxes, _ = per_frame_boxes(detector,
+                               lambda i: frames[i] if 0 <= i < n else None, n)
+    return solved_at(list(zip(frames, boxes)))
+
+
+def adjudicate_take(args, solve_src, scan_src, solve_moves, scan_moves,
+                    detector, lighting_ok=None):
+    """Assemble SolveEvidence from one sitting and run the gate."""
+    from anticheat_gate import SolveEvidence, adjudicate
+
+    s_load, s_n, s_fps, _w, s_t = solve_src
+    solve_seconds = float(s_t[-1] - s_t[0]) if len(s_t) > 1 else None
+
+    probe = s_load(0)
+    fh, fw = probe.shape[:2]
+
+    # A capture rate far off training makes the COUNT unreadable, not merely
+    # noisier. It goes in as None — which abstains — rather than as a number
+    # that would manufacture a too_few_moves rejection out of a frame-rate
+    # problem.
+    fps_bad = abs(s_fps - TRAIN_FPS) / TRAIN_FPS > FPS_TOLERANCE
+
+    scan_seconds = None
+    if scan_src is not None:
+        _cl, _cn, _cf, _cw, c_t = scan_src
+        scan_seconds = float(c_t[-1] - c_t[0]) if len(c_t) > 1 else 0.0
+
+    ev = SolveEvidence(
+        session=f"verify_{time.strftime('%Y%m%d_%H%M%S')}",
+        solve_seconds=solve_seconds,
+        observed_moves=None if fps_bad else len(solve_moves),
+        observed_moves_after_stop=(None if (fps_bad or scan_src is None)
+                                   else len(scan_moves)),
+        post_stop_seconds=scan_seconds,
+        continuity=_guard_over(solve_src, fw, fh, "solve"),
+        # The appearance/swap meter is deliberately NOT fed in. Its
+        # threshold is uncalibrated on the attack side (swap_check.py bounds
+        # the legit ceiling only), and an uncalibrated bar in a verdict is
+        # how a false DQ ships. Same call live_anticheat.py makes.
+        swap_jump=None, swap_threshold=None,
+        lighting_ok=lighting_ok,
+        solved_at_stop=(_solved_at_stop(solve_src, scan_src, detector)
+                        if scan_src is not None else None),
+        post_stop_continuity=(_guard_over(scan_src, fw, fh, "post-stop")
+                              if scan_src is not None else None),
+    )
+    verdict = adjudicate(ev)
+    verdict["_detail"] = {
+        "capture_fps": round(s_fps, 1),
+        "count_suppressed_by_fps": fps_bad,
+        "raw_move_count": len(solve_moves),
+        "lighting_ok": lighting_ok,
+        "solve_frames": s_n,
+        "scan_frames": None if scan_src is None else scan_src[1],
+    }
+    return verdict
+
+
+def print_anticheat(v):
+    from anticheat_gate import (MIN_OBSERVED_MOVES, post_stop_limit,
+                                separation_tps_limit)
+
+    d = v["_detail"]
+    print(f"\n{'=' * 70}")
+    print(f"  ANTICHEAT VERDICT: {v['verdict'].upper()}")
+    print(f"{'=' * 70}")
+    for r in v["reject_reasons"]:
+        print(f"    REJECTED: {r}")
+    for r in v["review_reasons"]:
+        print(f"    review:   {r}")
+    if not v["reject_reasons"] and not v["review_reasons"]:
+        print(f"    every test passed")
+    print(f"\n    moves in the timed window   {v['observed_moves']} "
+          f"(floor {MIN_OBSERVED_MOVES}"
+          + (f", headroom {v['headroom_moves']:+d}"
+             if "headroom_moves" in v else "") + ")")
+    if v.get("solve_seconds"):
+        print(f"    solve time                  {v['solve_seconds']:.2f}s"
+              + (f"   {v['tps']:.2f} TPS (abstains above "
+                 f"{separation_tps_limit():.2f})" if v.get("tps") else ""))
+    if d["count_suppressed_by_fps"]:
+        print(f"    capture rate {d['capture_fps']:.1f} fps suppressed the "
+              f"count; it would have read {d['raw_move_count']}")
+    if d["scan_frames"] is not None:
+        print(f"    post-stop window            {d['scan_frames']} frames, "
+              f"allowance {post_stop_limit(v.get('post_stop_seconds'))} moves")
+    for c in v.get("caveats", []):
+        print(f"    caveat: {c}")
+    print(f"\n    This is the SERVER's question — should this count — and it "
+          f"is decided\n    separately from whether a consistent story "
+          f"exists. Both were computed\n    from the same frames.")
+
+
+# ---------------------------------------------------------------------------
 # Live mode
 # ---------------------------------------------------------------------------
 
@@ -808,7 +988,8 @@ def save_take(out_dir: Path, buf, stamps, truth, meta: dict) -> Path | None:
 
 
 def record_phase(args, title, instructions, overlay=None, truth=None,
-                 save_as: str | None = None, save_meta: dict | None = None):
+                 save_as: str | None = None, save_meta: dict | None = None,
+                 max_seconds: float | None = None, cap_reason: str = ""):
     """
     Record one take. Returns (load_color, n_frames, fps, window, frame_times).
 
@@ -836,7 +1017,8 @@ def record_phase(args, title, instructions, overlay=None, truth=None,
                              if truth.connected else "BLE DISCONNECTED")
 
     buf, stamps = LD.capture(args.camera, overlay=overlay,
-                             status_fn=status_fn)
+                             status_fn=status_fn, max_seconds=max_seconds,
+                             cap_reason=cap_reason)
     if not buf or len(stamps) < 2:
         return None
     window = (float(stamps[0]), float(stamps[-1]))
@@ -909,18 +1091,23 @@ def _run_live(args, tables, stack, truth):
     def analyse(src, label):
         load_color, n, fps, _window, ftimes = src
         print(f"\n  analysing {n} frames...")
+        # `ftimes` is the real per-frame capture clock (resampled ordering
+        # included). Every arm gets it: it is what each move's `time` field
+        # is stamped from, and the coach's L1 metrics are differences of
+        # those stamps. See decode.move_time for what nominal fps costs.
         if args.ctc:
             import joint_decode as JD
             res = JD.analyse_ctc_live(load_color, n, fps, detector,
                                       det_model, device,
                                       beam=args.ctc_beam, lm=args.lm,
                                       alpha=args.lm_alpha if args.lm else 0.0,
-                                      beta=args.lm_beta if args.lm else 0.0)
+                                      beta=args.lm_beta if args.lm else 0.0,
+                                      frame_times=ftimes)
         elif args.joint:
             import joint_decode as JD
             res = JD.analyse_joint_live(load_color, n, fps, detector,
                                         det_model, device, threshold,
-                                        min_sep)
+                                        min_sep, frame_times=ftimes)
         else:
             res = LD.analyse(load_color, n, fps, detector, det_model, device,
                              threshold, min_sep, args.classifier,
@@ -1066,6 +1253,33 @@ def _run_live(args, tables, stack, truth):
     if res is None:
         sys.exit("Nothing to verify.")
 
+    # PHASE 3 — the post-timer verification scan. Not a third measurement:
+    # it is the window the anticheat gate's two strongest arms live in.
+    # Without it `observed_moves_after_stop` and `post_stop_continuity` are
+    # both None, and adjudicate() then has nothing standing between it and
+    # the two attacks that happen AFTER the clock stops (solve the cube once
+    # the timer is off; make real moves without solving and swap a solved
+    # cube in for the scan).
+    scan_src, scan_res = None, None
+    if not args.no_anticheat:
+        scan_src = record_phase(
+            args, "PHASE 3 — POST-TIMER SCAN (anticheat)",
+            ["Present every face of the SOLVED cube to the camera.",
+             "SPACE to start, SPACE when done. Do not turn the cube.",
+             f"Hard cap {AG_POST_STOP_MAX_WINDOW_S:.0f}s — past that the "
+             f"phantom allowance could hide a whole solve",
+             "and the test provably has no power, so the gate abstains."],
+            truth=truth, save_as=f"solve_{stamp}_scan",
+            save_meta={"phase": "scan"},
+            max_seconds=AG_POST_STOP_MAX_WINDOW_S,
+            cap_reason="post-stop test loses power past this")
+        if scan_src is None:
+            print(f"\n  No scan recorded — the anticheat gate will ABSTAIN on "
+                  f"the post-stop\n  window rather than pass it. That is the "
+                  f"safe direction, not a free pass.")
+        else:
+            scan_res = analyse(scan_src, "post-timer scan")
+
     # Phase 2 is the real use case precisely BECAUSE it has no ground truth
     # — a solve is not a prescribed word and nobody remembers 60 moves
     # afterwards. The cube remembers. That does not weaken the claim (the
@@ -1115,7 +1329,166 @@ def _run_live(args, tables, stack, truth):
                                      phase2["cost_rows"], phase2["del_costs"],
                                      args, tables, seed=args.seed or 0,
                                      beam=phase2["res"]["beam_used"])
+
+    # The anticheat gate, on the same frames. Run LAST because it is the
+    # expensive part (a YOLO pass per window for the continuity guard, plus
+    # the solved-at-stop check) and because a failure here must not cost the
+    # reconstruction result that has already been printed.
+    if not args.no_anticheat:
+        try:
+            phase2["anticheat"] = adjudicate_take(
+                args, src, scan_src, res["moves"],
+                # A scan that decoded NO moves is the good outcome, not a
+                # missing measurement — analyse() returns None for an empty
+                # decode, and confusing that with "not analysed" would turn
+                # the cleanest possible scan into an abstention.
+                (scan_res or {}).get("moves", []),
+                detector=stack[0],
+                lighting_ok=_lighting_ok(res))
+            print_anticheat(phase2["anticheat"])
+        except Exception as exc:                            # noqa: BLE001
+            print(f"\n  anticheat gate failed to run: "
+                  f"{type(exc).__name__}: {exc}")
+            print(f"  The reconstruction verdict above is unaffected.")
     return phase1, phase2, sweep
+
+
+def _session_src(d: Path, lo: int, hi: int):
+    """A recorded session's frames [lo, hi) as a record_phase-shaped source.
+
+    Exists so the anticheat path can be exercised WITHOUT a camera. Same
+    5-tuple record_phase returns — (load_color, n, fps, window, frame_times)
+    — so `adjudicate_take` cannot tell the difference, which is the point:
+    a rehearsal that ran through a parallel code path would prove nothing
+    about the live one.
+    """
+    import cv2
+
+    recs = [json.loads(l) for l in open(d / "frames.jsonl") if l.strip()]
+    recs = [r for r in recs if (d / "frames" / r["file"]).exists()]
+    recs = recs[lo:hi]
+    if len(recs) < 2:
+        return None
+    ts = np.array([r["ts"] for r in recs], dtype=np.float64)
+    fps = (len(recs) - 1) / (ts[-1] - ts[0]) if ts[-1] > ts[0] else 30.0
+    paths = [str(d / "frames" / r["file"]) for r in recs]
+    return (lambda i: cv2.imread(paths[i]), len(recs), fps,
+            (float(ts[0]), float(ts[-1])), ts)
+
+
+def run_anticheat_session(args, _tables):
+    """
+    Replay a recorded session through the anticheat gate — no camera.
+
+    The session is SPLIT into the two windows the live path records
+    separately: everything up to a guard interval after the last true BLE
+    onset is the timed solve, and the move-free tail after it stands in for
+    the post-timer scan. That is the same substitution
+    `anticheat_gate.py calibrate-poststop` makes, and it is honest for this
+    purpose — the tail genuinely is "the cube being held in front of the
+    camera with no moves in it".
+
+    WHAT IT DOES AND DOES NOT ESTABLISH. It exercises the whole wiring:
+    both continuity guards, solved-at-stop, the lighting probe, the count,
+    and adjudicate() itself, on real frames. It does NOT measure the gate —
+    `anticheat_gate.py score` does that over the corpus. This is the
+    check you run before spending a live take, so that a broken import or a
+    mis-shaped evidence field is found here rather than with a cube in your
+    hand.
+    """
+    d = Path(args.anticheat_session)
+    if not (d / "frames.jsonl").is_file():
+        sys.exit(f"{d} has no frames.jsonl")
+
+    npz = d / "detector_stream_color.npz"
+    n_all = sum(1 for l in open(d / "frames.jsonl") if l.strip())
+    if npz.is_file():
+        z = np.load(npz, allow_pickle=True)
+        onsets = z["onset_idx"].astype(int)
+        fps = float(z["fps"])
+        split = (int(onsets.max()) + int(round(args.guard_s * fps))
+                 if onsets.size else n_all // 2)
+    else:
+        print(f"  no prepared stream — splitting at "
+              f"{100 * (1 - args.tail_frac):.0f}% instead of at the last "
+              f"true onset")
+        split = int(n_all * (1 - args.tail_frac))
+    split = int(np.clip(split, 8, n_all - 2))
+
+    print(f"\n{'=' * 70}")
+    print(f"  ANTICHEAT REHEARSAL — {d.name}")
+    print(f"{'=' * 70}")
+    print(f"  {n_all} frames; timed window [0,{split}), "
+          f"post-stop window [{split},{n_all})")
+
+    solve_src = _session_src(d, 0, split)
+    scan_src = _session_src(d, split, n_all)
+    if solve_src is None:
+        sys.exit("Not enough frames in the timed window.")
+
+    stack = (load_ctc_stack(args) if args.ctc else
+             load_joint_stack(args) if args.joint else load_stack(args))
+    detector, det_model, device, threshold, min_sep = stack
+
+    def analyse_window(src, label):
+        if src is None:
+            return None
+        load_color, n, fps, _w, ftimes = src
+        print(f"\n  decoding the {label} ({n} frames)...")
+        if args.ctc:
+            import joint_decode as JD
+            r = JD.analyse_ctc_live(load_color, n, fps, detector, det_model,
+                                    device, beam=args.ctc_beam,
+                                    frame_times=ftimes)
+        elif args.joint:
+            import joint_decode as JD
+            r = JD.analyse_joint_live(load_color, n, fps, detector, det_model,
+                                      device, threshold, min_sep,
+                                      frame_times=ftimes)
+        else:
+            r = LD.analyse(load_color, n, fps, detector, det_model, device,
+                           threshold, min_sep, args.classifier,
+                           frame_times=ftimes)
+        return r
+
+    solve_res = analyse_window(solve_src, "timed window")
+    scan_res = analyse_window(scan_src, "post-stop window")
+    v = adjudicate_take(args, solve_src, scan_src,
+                        (solve_res or {}).get("moves", []),
+                        (scan_res or {}).get("moves", []),
+                        detector=detector, lighting_ok=_lighting_ok(solve_res))
+    print_anticheat(v)
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        # default=str, because solved_check.solved_at returns numpy scalars
+        # (np.bool_, np.float32) that json refuses. Coercing them here rather
+        # than in solved_check keeps that module free to stay numeric.
+        Path(args.out).write_text(json.dumps(v, indent=2, default=str))
+        print(f"\n  -> {args.out}")
+    return v
+
+
+def _lighting_ok(res):
+    """True/False/None for the take's lighting, from the ANALYSED result.
+
+    Takes `res` — what analyse() returned — rather than the raw capture, so
+    the statistics are computed on `stream_frames`: the cropped 96x96 block
+    the model itself was scored on. That is not a convenience, it is the
+    only correct input; lighting_check's reference is aggregated over
+    cropped streams, and feeding it raw camera frames makes every take read
+    as out of distribution (see lighting_check.assess for the measurement).
+
+    None means NOT ASSESSED and is deliberately harmless — adjudicate()
+    abstains only on an explicit False, so neither a missing reference nor
+    the default detector+classifier arm (which builds a GRAYSCALE stream and
+    so has no colour block to assess) can push every take into review. Only
+    `False` costs anything, and it costs an abstention rather than a
+    rejection, because low light destroys the ONSET DETECTOR (measured: 40+
+    points, against ~5 for the classifier) and the move count is exactly the
+    detector's output.
+    """
+    from lighting_check import assess
+    return assess((res or {}).get("stream_frames"))
 
 
 # ---------------------------------------------------------------------------
@@ -1375,6 +1748,31 @@ def main():
     p.add_argument("--no-lighting-check", action="store_true",
                    help="Skip the pre-take lighting reminder "
                         "(lighting_check.py)")
+    p.add_argument("--anticheat-session", default=None, metavar="DIR",
+                   help="Rehearse the ANTICHEAT gate on a recorded session, "
+                        "no camera: the session is split into a timed window "
+                        "and a move-free tail standing in for the post-timer "
+                        "scan, and adjudicate() runs on the result. Use it to "
+                        "check the wiring before spending a live take. Not a "
+                        "measurement of the gate — anticheat_gate.py score "
+                        "is.")
+    p.add_argument("--guard-s", type=float, default=1.0,
+                   help="--anticheat-session: seconds after the last true "
+                        "onset before the post-stop window starts")
+    p.add_argument("--tail-frac", type=float, default=0.15,
+                   help="--anticheat-session: fraction of the session used "
+                        "as the post-stop window when there is no prepared "
+                        "stream to find the last onset in")
+    p.add_argument("--out", default=None,
+                   help="--anticheat-session: write the verdict here")
+    p.add_argument("--no-anticheat", action="store_true",
+                   help="Skip phase 3 (the post-timer scan) and the "
+                        "anticheat_gate.adjudicate() verdict. The gate costs "
+                        "a YOLO pass over each window for the continuity "
+                        "guard, so this is the flag for a quick "
+                        "reconstruction-only take — NOT a way to make a "
+                        "take pass, since a missing scan window makes the "
+                        "gate abstain rather than approve.")
     # Decoder knobs — same defaults and meanings as reconstruct.py.
     p.add_argument("--beam", type=int, default=RC.BEAM)
     p.add_argument("--retry-beam", type=int, default=4 * RC.BEAM)
@@ -1443,6 +1841,16 @@ def main():
                  "only means anything\nwith --ctc. The peak-picking arms have "
                  "no beam over frames to fuse into.")
     args.lm = None                      # set by load_ctc_stack when --lm
+
+    if args.anticheat_session and args.session:
+        sys.exit("--anticheat-session and --session are two different "
+                 "rehearsals;\npick one. --session replays the "
+                 "RECONSTRUCTION, --anticheat-session the GATE.")
+
+    if args.anticheat_session:
+        # No pruning tables needed: the gate never decodes a cube state.
+        run_anticheat_session(args, None)
+        return
 
     tables = RC.build_tables()          # before any prompting, not mid-take
     if args.session:

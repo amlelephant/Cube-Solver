@@ -196,6 +196,83 @@ def compare(stats: dict, ref: dict) -> list[dict]:
     return sorted(out, key=lambda d: -abs(d["z"]))
 
 
+#: |z| beyond which `assess` reports the lighting as out of distribution.
+#: Looser than Z_WARN (2.5, the preflight reminder) because the two do
+#: different jobs: the reminder is free to nag, while this one feeds
+#: anticheat_gate.adjudicate() and a `False` there costs the user a VERIFIED
+#: verdict. When in doubt this must say "fine", because saying "bad" turns a
+#: passing solve into a review.
+Z_ABSTAIN = 3.0
+
+
+def assess(block, ref: dict | None = None,
+           z_max: float = Z_ABSTAIN) -> bool | None:
+    """
+    A cropped colour stream -> True (in distribution) / False / None.
+
+    `block` MUST be the (N, FRAME_SIZE, FRAME_SIZE, 3) cropped stream the
+    model itself was fed — prepare_data.build_color_stream's output — and
+    NOT raw camera frames.
+
+        THIS IS THE WHOLE REASON THIS FUNCTION EXISTS. `build_reference`
+        aggregates `detector_stream_color.npz`, which is already cropped by
+        that same code, so the reference describes CUBE CROPS. Handing it
+        full 1280x720 frames compares a picture of a room against a
+        distribution of pictures of a cube: `luma_mean`, `saturation` and
+        `rb` all shift by far more than any lighting change does, every
+        take reads as out of distribution, and the gate abstains on a
+        perfectly lit solve. Measured on solve_20260803_100135_solve, a
+        10:01 morning take that is inside the corpus by construction: full
+        frames give |z| > 3 and a REVIEW verdict; the cropped block gives
+        |z| = 1.7 and passes.
+
+        It is the same crop-regime trap that cost this project a day on the
+        classifier in 2026-07-25, in a new place.
+
+    `None` means NOT ASSESSED — no reference on disk, or a block too short
+    to have a `diff_floor`. Callers must treat it as harmless: only an
+    explicit `False` may cost anything.
+
+    WHAT IT COSTS, MEASURED (`python lighting_check.py --abstain-rate`,
+    2026-08-10, 76 prepared sessions). At Z_ABSTAIN = 3.0 this returns False
+    on **8 of 76** sessions — 5 of 62 daytime and 3 of 14 evening — so
+    roughly one honest daytime take in twelve goes to REVIEW on lighting
+    alone. Worth knowing before treating that as free: an abstention is not
+    a DQ, but it is not a VERIFIED either.
+
+        Two caveats on that number, in opposite directions. The corpus is
+        what DEFINES the reference, so a session inside it reading |z| > 3
+        is a statement about the spread being tight, not about the room.
+        And 7 of the 8 are driven by `luma_std` — the spatial spread of
+        luma inside the crop — which is as much a measure of how much
+        BACKGROUND the box caught as of the light. That makes this partly a
+        crop-quality gate wearing a lighting label.
+
+    Until this fired, none of that mattered: `live_anticheat.py`'s probe
+    passed JPEG-encoded buffers to `frame_stats`, raised on every call, and
+    was swallowed by a bare `except` — so `lighting_ok` was None on every
+    run the program had ever done and the abstention had never once fired.
+    Fixing the probe turns a dormant path on, which is why its rate is
+    measured here rather than assumed.
+    """
+    import numpy as _np
+
+    ref = ref if ref is not None else load_reference()
+    if ref is None or block is None:
+        return None
+    a = _np.asarray(block)
+    # diff_floor is a percentile over CONSECUTIVE-frame differences, so a
+    # subsampled block is not merely noisier, it measures something else.
+    if a.ndim != 4 or a.shape[0] < 10 or a.shape[-1] != 3:
+        return None
+    try:
+        worst = max((abs(d["z"]) for d in compare(frame_stats(a), ref)),
+                    default=0.0)
+    except (ValueError, TypeError, IndexError):
+        return None
+    return bool(worst < z_max)
+
+
 def report(stats: dict, ref: dict, label: str = "this take") -> list[dict]:
     """
     Print how one session compares to the corpus, per statistic.
@@ -250,6 +327,62 @@ def time_of_day_note(ts: float | None = None) -> str | None:
     )
 
 
+def cmd_abstain_rate(root: Path = Path("../training_data")):
+    """How many honest takes would `assess` send to review?
+
+    Runs over the prepared corpus — the same streams `build_reference`
+    aggregates — so it answers the question in the units that matter: not
+    "is this take unusual" but "what fraction of ordinary sessions does the
+    anticheat gate refuse to verify on lighting grounds".
+    """
+    from collections import Counter
+
+    ref = load_reference()
+    if ref is None:
+        sys.exit("No reference; build it with --build")
+    try:
+        from eval_lighting import DAY_END as _DE, DAY_START as _DS, take_hour
+    except ImportError:
+        take_hour, _DS, _DE = (lambda d: None), DAY_START, DAY_END
+
+    rows = []
+    for d in sorted(root.iterdir()):
+        p = d / "detector_stream_color.npz"
+        if not p.is_file():
+            continue
+        block = np.load(p, allow_pickle=True)["frames"]
+        c = compare(frame_stats(block), ref)
+        hour = take_hour(d)
+        rows.append({"session": d.name, "worst_z": max(abs(x["z"]) for x in c),
+                     "driver": c[0]["name"], "hour": hour,
+                     "daytime": hour is not None and _DS <= hour < _DE})
+    if not rows:
+        sys.exit(f"no prepared streams under {root}")
+
+    bad = [r for r in rows if r["worst_z"] >= Z_ABSTAIN]
+    day = [r for r in rows if r["daytime"]]
+    eve = [r for r in rows if not r["daytime"]]
+    zs = np.array([r["worst_z"] for r in rows])
+    print(f"\n  {len(rows)} prepared sessions vs the "
+          f"{ref['n_sessions']}-session reference")
+    print(f"  worst |z| per session: median {np.median(zs):.2f}  "
+          f"p90 {np.percentile(zs, 90):.2f}  max {zs.max():.2f}")
+    print(f"\n  assess() -> False at Z_ABSTAIN={Z_ABSTAIN}: "
+          f"{len(bad)}/{len(rows)} sessions")
+    print(f"    daytime {sum(r['worst_z'] >= Z_ABSTAIN for r in day)}"
+          f"/{len(day)}   evening "
+          f"{sum(r['worst_z'] >= Z_ABSTAIN for r in eve)}/{len(eve)}")
+    print(f"  driver of the flag: "
+          f"{Counter(r['driver'] for r in bad).most_common()}")
+    for r in sorted(bad, key=lambda r: -r["worst_z"]):
+        print(f"    {r['session']:38s} |z|={r['worst_z']:5.2f} on "
+              f"{r['driver']:<12s} hour={r['hour']}")
+    print(f"\n  Each of these is a take the anticheat gate would send to "
+          f"REVIEW rather than\n  VERIFY, on lighting alone. The corpus "
+          f"DEFINES the reference, so a session\n  inside it exceeding |z|=3 "
+          f"says the spread is tight, not that the room was\n  dark.")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -259,10 +392,18 @@ def main():
                    default=["../training_data/solve_*/"])
     p.add_argument("--check", nargs="+", default=None,
                    help="Check prepared session(s) against the reference")
+    p.add_argument("--abstain-rate", action="store_true",
+                   help="How often assess() would return False across the "
+                        "prepared corpus — i.e. how many honest takes the "
+                        "anticheat gate would send to review on lighting")
     args = p.parse_args()
 
     if args.build:
         build_reference(args.sessions)
+        return
+
+    if args.abstain_rate:
+        cmd_abstain_rate()
         return
 
     ref = load_reference()

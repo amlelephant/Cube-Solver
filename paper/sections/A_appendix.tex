@@ -1,0 +1,126 @@
+\section{Notation and glossary}
+\label{app:notation}
+
+\begin{center}\small
+\begin{tabular}{@{}lp{11.4cm}@{}}
+\toprule
+\textbf{Term} & \textbf{Meaning here} \\
+\midrule
+onset & the instant a turn begins; the event the model must place \\
+turn / move & one quarter turn, one of the 12 alphabet symbols \\
+QTM / HTM & quarter- / half-turn metric. This system is entirely QTM \\
+take & one recording; a \emph{scramble} take or a \emph{solve} take \\
+session & synonym for take; the unit of the holdout split \\
+posteriorgram & the $T\times13$ matrix of per-frame class posteriors \\
+miss & a true move the decoder never emitted (recall failure) \\
+phantom & an emitted move that was not performed (precision failure) \\
+substitution & a move emitted at roughly the right place, named wrong \\
+MER & move error rate: Levenshtein distance $\div$ true length \\
+per-move accuracy & aligned matches $\div$ true length. Does not charge
+  phantoms; MER does \\
+raw / post-decode & before / after the group-theoretic repair \\
+verified & the group decode found a story reaching solved (accuracy tier),
+  \emph{or} the count gate returned \texttt{VERIFIED} (legitimacy tier) ---
+  the two are unrelated and the text always says which \\
+decoy & a deliberately false claim used to test the verifier \\
+bracketed / after & held-out days sandwiched between training days, versus
+  strictly later than the last one \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Reproducing every number}
+\label{app:repro}
+
+\paragraph{Environment.} Windows 11, Python 3.13, PyTorch 2.13 + CUDA 13,
+NVIDIA RTX 5070 Ti Laptop, OpenCV 5.0 (contrib build --- the base package
+lacks the CSRT tracker and its absence degrades detection silently).
+
+\paragraph{Order.} Scripts live in \file{paper/scripts/} and are run from
+inside \file{ble/move\_detector/}, matching the repository's convention that
+scripts resolve their models and data by bare relative name.
+
+\begin{verbatim}
+cd ble
+python backfill_camera_frame.py --sessions training_data/solve_*/
+cd move_detector
+python prepare_data.py --color --sessions ../training_data/solve_<new>/
+
+python ../../paper/scripts/m1_recognition.py   # raw CTC + posteriorgram cache
+python ../../paper/scripts/m4_ablation.py      # the five-rung ladder
+python ../../paper/scripts/m5_diagnostics.py   # ladder, frame, confusion
+python anticheat_gate.py score --ctc checkpoints/move_ctc_spd_s0.pt
+python anticheat_gate.py score --ctc checkpoints/move_ctc_spd_s1.pt
+python ../../paper/scripts/m2_decode.py --only move_ctc_spd_s0 \
+       --out m2_decode_s0.json          # slow; run the two seeds in parallel
+python ../../paper/scripts/m2_decode.py --only move_ctc_spd_s1 \
+       --out m2_decode_s1.json
+
+python ../../paper/scripts/mknumbers.py        # -> data/numbers.tex, tables
+python ../../paper/scripts/f1_data_and_model.py
+python ../../paper/scripts/f2_results.py
+python ../../paper/scripts/f3_decode.py
+\end{verbatim}
+
+\paragraph{The provenance guard.} \file{paper/scripts/common.py} derives the
+holdout from each checkpoint's own recorded
+\texttt{train\_session\_names} and \texttt{val\_session\_names}, intersected
+across every checkpoint being compared. No script in this report accepts a
+hand-written session list. If a checkpoint predates the recording of those
+fields, it cannot be scored at all rather than being scored on a guess.
+
+\paragraph{Cost.} Preprocessing 18 sessions: ${\sim}6$ minutes.
+Recognition sweeps: ${\sim}20$ minutes. Ablation ladder (10 checkpoints
+$\times$ 14 sessions): ${\sim}25$ minutes. The group decode dominates
+everything --- roughly 45\,s per decode at beam 4000 on a 130-onset session,
+and each session costs one base decode, possibly a retry at beam 16000, and
+four decoys.
+
+\section{Per-session detail}
+\label{app:persession}
+
+\begin{table}[h]
+\centering\small
+\caption{Every held-out session, seed 0, raw CTC with prefix-beam decoding.}
+\label{tab:persession}
+\input{data/tab_persession}
+\end{table}
+
+\section{Map of the codebase}
+\label{app:code}
+
+For orientation when reading alongside the repository. Everything below is
+under \file{ble/move\_detector/} unless noted.
+
+\begin{center}\small
+\begin{tabular}{@{}lp{10.4cm}@{}}
+\toprule
+\textbf{File} & \textbf{Role} \\
+\midrule
+\file{../record\_training.py} & webcam + BLE capture; writes frames,
+  \file{frames.jsonl}, \file{moves.jsonl} \\
+\file{../slice\_frame.py} & the camera$\leftarrow$cube frame algebra;
+  pure, dependency-free, self-tested \\
+\file{../backfill\_camera\_frame.py} & adds \texttt{camera\_notation} to
+  recorded sessions; additive and idempotent \\
+\file{prepare\_data.py} & frames $\to$ \file{detector\_stream\_color.npz}
+  (crop, resize, 4 channels, onset indices and classes) \\
+\file{dataset.py} & clip sampling, targets, augmentation, session splitting,
+  and the crop/label regime guards \\
+\file{model.py} & \texttt{FrameEncoder} + TCN + heads;
+  \texttt{score\_stream\_joint} for whole-session inference \\
+\file{train\_ctc.py} & the CTC training loop \\
+\file{ctc\_decode.py} & greedy and prefix-beam CTC decoding; MER \\
+\file{reconstruct.py} & the group-theoretic decode: cube algebra, pattern
+  databases, the beam, the cost model \\
+\file{anticheat\_gate.py} & the legitimacy verdict; floors, retention
+  calibration, three-tier adjudication \\
+\file{verify\_solve.py} & the end-to-end live claim: prescribed scramble
+  (measurement) then free solve (verification) \\
+\file{env\_suite.py} & cross-environment scorecards \\
+\midrule
+\file{../../cv/} & the separate scan-based path: YOLO cube detection, HSV+CNN
+  sticker classification, two-phase solver validation \\
+\bottomrule
+\end{tabular}
+\end{center}

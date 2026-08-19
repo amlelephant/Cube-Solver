@@ -1,0 +1,28 @@
+{
+  "s0": {
+    "n_solve": 14,
+    "verified": 14,
+    "false_dq": 0,
+    "review": 0,
+    "min_headroom": 39,
+    "median_headroom": 73,
+    "n_proxy": 14,
+    "caught": 14,
+    "lowest_legit": 71,
+    "highest_proxy": 22,
+    "gap": 49
+  },
+  "s1": {
+    "n_solve": 14,
+    "verified": 14,
+    "false_dq": 0,
+    "review": 0,
+    "min_headroom": 43,
+    "median_headroom": 75,
+    "n_proxy": 14,
+    "caught": 14,
+    "lowest_legit": 75,
+    "highest_proxy": 23,
+    "gap": 52
+  }
+}

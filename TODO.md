@@ -20,17 +20,72 @@ solver-following, hidden solve after the timer stops, and fabricated times
 (the timing attack collapses into the count attack). It does **not** catch a
 cheat who makes a full solve's worth of plausible moves on camera without
 solving and swaps a solved cube in at the end — that reads as ~50 moves and
-clears the floor of 32. Continuity and appearance own that case, and it is
-now the only physical attack left besides injection.
+clears the floor of 32.
 
-- [ ] **Record the one attack that survives the count gate:** enough moves,
-      then swap — including the table-edge/below-frame variant. Only 1
-      session exists (`table_edge_20260804_175814`). Tune trajectory
-      continuity and `swap_check` thresholds against them. *Generic* swap
-      variety is no longer worth recording; this specific shape is.
+- [ ] **The enough-moves-then-swap attack — REOPENED 2026-08-10.** The
+      mechanism is right and built (`cv/detection/solved_check.py` plus a
+      post-stop custody guard, both wired into `adjudicate()`), but the
+      0-false-DQ number does **not** reach the live call. Details and the
+      full 2×2 in `ANTICHEAT.md` §2.1a; harness
+      `ble/move_detector/stop_window_check.py`.
+  - The published cell — `tail_window` (1.5 s ending 0.5 s before the last
+    frame) with `trajectory.npz` boxes — re-runs fresh and reproduces
+    exactly: 0 false DQ / 28, 20/28 caught. The live call reads a different
+    window (straddling the timer stop) with different boxes
+    (`per_frame_boxes`, +12% `CROP_MARGIN`) and lands at **3/28 false DQ =
+    10.7%**, against a launch requirement of <1%.
+  - Each factor costs ~2 false DQ alone. The threshold has **zero false-DQ
+    margin by construction** (set one step above the worst legit session),
+    so any input change spends margin it does not have.
+  - Retuned to zero false DQ on the live configuration the catch is
+    **13/28 (46%)**, not 71–100%.
+  - **Do not raise `SOLVED_MAX_REGIONS`** — that returns to the attack the
+    margin the test exists to take away. Two real options: re-derive on
+    what the live call feeds and accept ~46%, or move the evaluation into
+    the post-stop scan window where the cube is deliberately presented
+    (custody already covers that window, so it costs the attacker nothing
+    they did not have). Neither is built.
+  - Encouraging: the *window* move helps the catch side (23/28 vs 20/28 at
+    the shipped threshold). It is the false-DQ side that breaks.
+  - The idea that made it tractable: stop asking "is this the same cube"
+    (unanswerable against a same-brand second cube — appearance magnitude is
+    measured dead) and ask **"was the cube solved when the timer stopped"**.
+    The flailer's cube is not, and that fires *before* any swap happens.
+  - Deterministic, no ML, no facelet registration: count distinct solid
+    colour regions. Opposite faces merge into 3 axis classes, which is free
+    on the solved side (opposite faces can't both be visible) and deletes the
+    orange/red problem entirely.
+  - Measured on `*_solve` vs `*_scramble` tails, held out by date at three
+    cut points: **0 false DQ every time**, catch 71 / 90 / 100%. Verified
+    that the live path (`per_frame_boxes` + real detector) reproduces the
+    offline numbers on real sessions.
+  - **Residual, and it is the usual one:** in warm evening light the
+    background classifies as a solid region and a scrambled cube can read as
+    solved. Three geometric fixes were tried and all measured *worse*; the
+    real fix is cube segmentation instead of a bounding box.
+- [ ] **Record the attack anyway** — enough moves, then swap, including the
+      table-edge/below-frame variant. Only 1 session exists
+      (`table_edge_20260804_175814`). The proxy above covers the
+      **solved-at-stop** side well (a `*_scramble` tail genuinely is "real
+      moves performed, cube not solved"); it does **not** proxy the
+      **custody** side at all, which has never seen a real swap. That is the
+      measurement this recording buys.
 - [ ] Record timer-stop-to-scan footage. The post-stop phantom rate is
       extrapolated off 1–3s session tails and the real window is tens of
-      seconds.
+      seconds. **`verify_solve.py` now records exactly this** as phase 3
+      (`solve_<stamp>_scan`, saved with `--save`), so every live take from
+      here on buys some — the `_scan` suffix is skipped by the coach and
+      robustness harnesses so it cannot be mistaken for a solve.
+  - Re-measured meanwhile (2026-08-10, `anticheat_gate.py
+    calibrate-poststop --min-s 1.5`, fresh on all three checkpoints): on the
+    SHIPPING models the phantom rate on move-free tails is **0.00 per 10s,
+    5 held-out tails, both seeds**, where `aug44_s0` — the checkpoint
+    `POST_STOP_PHANTOM_RATE = 4.0` was set from — reaches 4.41/10s and now
+    exceeds its own constant. Speed augmentation appears to have removed
+    post-stop phantoms entirely. **Do not tighten the rate on this**: 5
+    short tails of a cuber admiring a solved cube is not the scan window,
+    and a no-false-DQ constant must not be calibrated on it. Keep 4.0; the
+    finding is that it now has headroom, not that it should shrink.
 - [x] Speed-augmented model wired into `verify_solve.py` — `--ctc-model` now
       defaults to `checkpoints/move_ctc_spd_s0.pt`. **Ready for a live take:**
       `python verify_solve.py --ble --front blue --top yellow --ctc --save`
@@ -38,14 +93,36 @@ now the only physical attack left besides injection.
       the speed gains were measured by *simulating* speed (dropped frames,
       blur-approximated exposure), so real fast footage with real motion blur
       is the arbiter. Solve fast and see whether the count holds.
-- [ ] Wire `adjudicate()` into `verify_solve.py`'s live path. It is a pure
-      function over plain data specifically so the client and the server can
-      both run it and agree. (The model is wired; the *gate* is not yet
-      called from the live path.)
-- [ ] Enforce the 60s cap on the post-timer scan window in the capture UI.
-      Past that the phantom allowance could hide a whole solve and the test
-      provably has no power — the gate abstains rather than passing, so the
-      failure is safe but the feature is lost.
+- [x] **`adjudicate()` wired into `verify_solve.py`'s live path — DONE
+      2026-08-10.** One sitting now produces both verdicts on the same
+      frames: the reconstruction verdict ("is there a consistent story") and
+      the gate's ("should this count"). A new **phase 3** records the
+      post-timer scan, so `solved_at_stop` and `post_stop_continuity` are
+      both supplied — a caller omitting them silently loses the only arm
+      covering the enough-moves-then-swap attack, which is why the phase
+      exists rather than being optional-by-default.
+  - `--anticheat-session DIR` replays the whole gate on a recorded session
+    with no camera (splits it into a timed window and its move-free tail),
+    so the wiring can be checked before spending a live take and re-checked
+    after any change. Not a measurement of the gate — `anticheat_gate.py
+    score` is that.
+  - `--no-anticheat` skips phase 3 for a quick reconstruction-only take. It
+    is not a way to make a take pass: a missing scan window makes the gate
+    abstain, not approve.
+  - `cv/detection/continuity_guard.run_guard()` is now the single driver for
+    the guard loop (live, post-hoc and server), and takes real per-frame
+    timestamps — the guard's gap and cadence tests are wall-clock tests, so
+    feeding them `idx / mean_fps` hides exactly the stall a cadence check
+    exists to catch.
+- [x] **60s cap on the post-timer scan enforced in the capture UI — DONE
+      2026-08-10.** `live_detect.capture(max_seconds=...)` hard-stops the
+      recording, with a countdown from 15 s out and the reason on screen.
+      Past the cap the phantom allowance could hide a whole solve; the gate
+      abstains rather than passing, so an uncapped UI converted every
+      VERIFIED into a REVIEW rather than opening a hole.
+  - Fixed alongside it: the REC indicator's elapsed-seconds readout was
+    computed from a 45-frame ring buffer, so it read ~1 s for the whole of
+    every take regardless of length.
 - [x] Abstain band re-derived on **two seeds** (2026-08-05).
       `RETENTION_FLOOR` now holds the worse-of-both-seeds curve for
       `move_ctc_spd_s0/s1`, moving `separation_tps_limit()` from **7.11 →
@@ -153,6 +230,8 @@ Daytime held-out sits at 95.6–96.1% post-decode, which meets the Coach ship
 gate. Verification no longer depends on this number (the count gate does not
 read move identity).
 
+New Idea: I may not be an expert in how this thing actually works but I do know how it fails. It lacks any sort of anchor points and it seems that determining it by any measurement other than visual verification has not worked. I think that we should move towards a visual algorithim similar to one my partner has designed. It is basically trained to fix a lattice onto the cube and read color tiles that are visible. I think that it might be best to not reinvent the wheel since he has already done it. I also think that the animation that he designed would be a really cool addition to the visual aspect of our solve screen. 
+
 - [ ] **Speed-aug seed 1** — running. Seed 0 gave a tie on val MER (5.4%
       greedy vs `aug44`'s 5.26%) and a large retention gain: worst held-out
       session +0.145 at 6 TPS, +0.250 at 8, +0.270 at 10, with all four
@@ -162,6 +241,37 @@ read move identity).
       2 sessions recorded 2026-08-04; more needed.
 - [ ] Wire `lighting_check.py` into capture so the user is warned *before*
       recording — the cheapest large win available (LAUNCH_ROADMAP B2).
+      (`verify_solve.py` already prints `time_of_day_note()` pre-take; what
+      is missing is the same warning in the product's capture UI.)
+- [x] **The lighting probe feeding `adjudicate()` never worked — FIXED
+      2026-08-10.** `live_anticheat.py` passed JPEG-**encoded buffers** to
+      `frame_stats`, which expects an `(N,H,W,3)` array. It raised
+      `AxisError` on every call, a bare `except` swallowed it, and
+      `lighting_ok` was therefore `None` on every run the program has ever
+      done — **the lighting abstention has never once fired live.** Two
+      faults worth naming separately: the wrong pixels, and an
+      `except Exception` broad enough to make a permanent failure invisible.
+  - The right input is the **cropped** block the model was scored on, not
+    raw camera frames: `build_reference` aggregates
+    `detector_stream_color.npz`, which is already cropped, so raw frames
+    compare a picture of a room against a distribution of pictures of a
+    cube. Measured on `solve_20260803_100135_solve`, a 10:01 take inside
+    the corpus by construction: raw frames give |z| > 3 and a REVIEW
+    verdict, the cropped block gives 1.7 and passes. Same crop-regime trap
+    that cost a day on the classifier in 2026-07-25, in a new place.
+  - One shared implementation now: `lighting_check.assess(block, ref)`,
+    called by both `live_anticheat` and `verify_solve`.
+  - **Turning a dormant path on has a cost, so it was measured**
+    (`python lighting_check.py --abstain-rate`): at `Z_ABSTAIN = 3.0`,
+    **8 of 76** corpus sessions read `False` — 5 of 62 daytime, 3 of 14
+    evening. Roughly one honest daytime take in twelve now goes to REVIEW
+    on lighting alone. Two caveats pulling opposite ways: the corpus
+    *defines* the reference, so a member exceeding |z|=3 says the spread is
+    tight rather than the room dark; and 7 of the 8 are driven by
+    `luma_std`, the spatial spread inside the crop, which is as much a
+    measure of how much background the box caught as of the light. That
+    makes it partly a crop-quality gate wearing a lighting label — worth
+    re-deriving `Z_ABSTAIN` deliberately before launch.
 - [ ] **Cheap measurement worth doing before more data:** is the detector's
       low-light failure the *same* axis as its fast-turn failure? Both are
       low-contrast temporal evidence. If so the speed augmentation may move
@@ -327,16 +437,32 @@ already exists in memory at decode time and is thrown away.
     unacceptable for the leaderboard. Keep the boundary explicit in code,
     not just in this file: analytics reads `Solve.moves`, the gate reads
     `observed_moves`.
-- [ ] **Carry the real capture timestamp through the decode.**
-      *Type: data plumbing (defect).*
-  - `ctc_to_moves` computes `time = frame / fps` off *nominal* fps, while
-    `frames.jsonl` records the true per-frame `ts` from capture. Webcam
-    frame intervals jitter, so those two disagree — and since every metric
-    here is an inter-onset difference, that error lands directly on the
-    metric rather than averaging out.
-  - Do: thread `frame_times` (already passed into `analyse()`) all the way
-    to the emitted move dict, and persist both `frame` and the real `t`.
-    Keep `frame` — it is what re-decoding and the evidence bundle key on.
+- [x] **Carry the real capture timestamp through the decode — DONE
+      2026-08-10.** *Type: data plumbing (defect).* One definition,
+      `decode.move_time`, is now called by all three emitters
+      (`live_detect.analyse`, `joint_decode.posteriorgram_to_moves`,
+      `ctc_decode.ctc_to_moves`), and `verify_solve` passes `ftimes` on
+      every arm. `frame` is kept — it is what re-decoding and the evidence
+      bundle key on.
+  - **Measured before fixing** (`frame_time_audit.py`, 76 sessions / 5811
+    intervals, `results/2026-08-10/frame_time_audit.json`): the two clocks
+    drift up to **145 ms** apart within a session, but almost entirely
+    common-mode, so on the inter-onset *intervals* every L1 metric is built
+    from it is **9.2 ms median / 27.7 ms p95** — under the 41 ms 30fps
+    jitter floor on 74 of 76 sessions.
+  - So it is a **tail fix, not a correction to the headline**: worst
+    session 12.1% error on hesitation seconds and 9.9% on execution TPS,
+    which is the same order as the evening error that already suppresses
+    those metrics — and it would have arrived with no regime flag to
+    explain it.
+  - **Why it survived**, worth keeping: every offline harness
+    (`onset_timing`, `execution_tps`, `metric_robustness`, `coach_report`)
+    re-times onsets itself from `frames.jsonl` and never reads the emitted
+    `time` field. The defect could therefore only ever bite the LIVE path,
+    and no offline measurement could see it. Offline numbers are unchanged
+    by the fix, by construction.
+  - Still open, and the other half of this item: **persisting** the stream
+    server-side (`Solve.moves`).
 - [ ] **Define t=0 once, in one place.** *Type: definition.*
   - `live_anticheat.py`'s `t_start` (SPACE, IDLE→SOLVING) is the timer
     start. Moves before it are inspection/setup; moves after the stop are
@@ -479,7 +605,44 @@ already exists in memory at decode time and is thrown away.
       `t_start`. Listed here because it is the one L1 metric that needs no
       move identity at all, so it survives evening lighting intact.
 
-### 7C. Which metrics survive our error — measured 2026-08-06
+### 7C. Which metrics survive our error — re-measured 2026-08-10
+
+> **The whole registry was re-measured on 2026-08-10** and the numbers in
+> `coach/report.py` now come from that run. The held-out set has more than
+> doubled since 2026-08-06 — **14 solves (9 daytime / 5 evening), up from
+> 6** — because the corpus grew. Before replacing anything, the harness was
+> re-run restricted to the original six sessions and reproduced the 08-06
+> table *exactly*, all 25 metrics in both regimes, so the numbers moved
+> because there is more data and for no other reason.
+>
+> **Two consequences that are decisions, not just numbers.**
+>
+> 1. **Nothing is suppressed in either regime any more.** Evening
+>    `hesitation_seconds` went 20.8% → 8.4% and `move_duration_cv` 16.2% →
+>    8.1%, both under the 15% suppression bar. The three metrics
+>    `/analytics` currently demonstrates as *withheld* would now be shown.
+>    That is what the measurement says, and the rule is that the
+>    measurement decides — but it rests on **five** evening solves, and the
+>    worst column for those same metrics is still 24.2% and 19.6%. If
+>    evening hesitation should stay hidden until the evening corpus is real
+>    (LAUNCH_ROADMAP B5), that is a *policy* change — lower
+>    `SUPPRESS_ABOVE_PCT`, or gate evening on the worst column instead of
+>    the median — not an edit to these numbers.
+> 2. **Medians settled, tails appeared.** `hesitation_seconds` daytime fell
+>    4.8% → 2.1% while its worst case rose 6.5% → 17.4%. That is what a
+>    bigger sample does. Read the worst column.
+>
+> Also fixed: **`metric_robustness.py` had been broken since 2026-08-06** —
+> it read `mv["awkward_face_fraction"]`, which `coach/moves.py` correctly
+> stopped returning when that metric was cut, so every session raised
+> `KeyError`, was caught by a blanket `except Exception ... skipped`, and
+> the run printed "Nothing scored" while exiting 0. The gate-filler could
+> not run at all. The rejected candidate is now computed inside the
+> harness (a rejection nobody can re-check is a rejection nobody can
+> revisit), and programming errors re-raise instead of being swallowed.
+
+The original 2026-08-06 analysis, whose *conclusions* all survived
+re-measurement:
 
 `metric_robustness.py` computes 21 candidate metrics twice per session —
 once from BLE truth, once from the decode the product would actually have
@@ -551,10 +714,30 @@ straight across the other taxonomy:
     robustness of a mean** — there is nothing for errors to average
     against. That refines §7C's rule: means are safe *when the denominator
     is large*.
+- [x] **TPS curve — BUILT + MEASURED 2026-08-10.** `coach.timing.tps_curve`
+      (sliding k=5, `(k-1)/span` per window so a pause stretches a window
+      rather than zeroing it), registered in `coach/report.py` as the
+      registry's first `series` metric. Scored by resampling truth and
+      decode onto one shared time grid — they disagree about how many
+      windows there are but share a wall clock — and taking the median
+      disagreement across 24 points.
+
+  | | daytime | evening |
+  |---|---|---|
+  | median error (worse seed) | **6.8%** | **10.2%** |
+  | worst session (worse seed) | **9.9%** | **14.0%** |
+
+  - Ships `high` daytime and `caution` evening — the only *rate* metric
+    reportable in both regimes. Its worst case is tighter than most scalars
+    in the registry, which is the pointwise-mean construction working.
+  - It **supersedes `slowdown_ratio`**, re-measured on the same run at
+    10.5–15.9% daytime and 12.2–21.2% evening: the curve is better in every
+    cell, and it is the same question asked as a sequence of means rather
+    than as one ratio of two estimates.
+  - Not yet rendered — `/analytics` shows scalars only, and a `series`
+    metric needs a chart. The payload carries `series: true` so the client
+    can branch rather than sniffing the JSON type.
 - [ ] **Still unbuilt, in priority order.**
-  - **TPS curve** (sliding k=5 window). The *curve* is a `mean` per window
-    and fine; `slowdown_ratio` as a single number is `ratio`-kind at 15–18%
-    error, so ship the curve and not the ratio.
   - **Cross-solve trends.** Aggregation is the error killer and every
     number above improves with it — this is what turns a 5%-accurate
     single-solve metric into a trustworthy trend.

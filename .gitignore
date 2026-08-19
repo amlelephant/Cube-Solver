@@ -100,3 +100,9 @@ server/**/__pycache__/
 # disk. They exist so DataLoader workers can share pages instead of each
 # inflating 3.2 GB through the spawn pickle.
 ble/training_data/**/*.frames.npy
+
+# One recorded session copied out for sharing (ble/export_example_session.py).
+# ~120MB of JPEGs; it lives here for convenience but must not enter history —
+# git history is permanent and this repo is already large. Send the zip instead.
+example solve/
+*.zip

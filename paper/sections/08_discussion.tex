@@ -1,0 +1,159 @@
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{What the numbers actually support}
+
+Three claims survive the holdout discipline of \cref{sec:holdout-hygiene}.
+
+\begin{enumerate}[leftmargin=1.4em,itemsep=3pt]
+\item \textbf{A small CTC video model reads a human speedsolve at
+\CIDayMean\% [\CIDayLo, \CIDayHi] per-move accuracy in reasonable light}, on
+\NHoldoutSolves\ solves it has never seen, at a median
+\MedianTPS\,turns/s with \CrowdedPctHoldout\% of turn pairs within two frames.
+The structural CTC ceiling for this corpus is \CTCCeilingHoldout\%, so about
+\RemainingGap\ points of the remaining gap are addressable in principle.
+\item \textbf{Move \emph{counting} separates a genuine solve from a
+solver-following proxy by tens of moves}, with zero false disqualifications
+across \ACSolves\ held-out solves on both seeds. Unlike everything else here,
+the quantity being thresholded is bounded by a theorem.
+\item \textbf{Held-out session count, not model capacity, is the binding
+constraint.} The same weights score above 97\% on one held-out session and
+below 79\% on another; capacity limits do not look like that. Every
+model-side intervention on record --- encoding rework, optical flow, anchor
+selection, per-frame noise --- measures flat, while every data-side one
+measures large (\cref{sec:ablation}).
+\end{enumerate}
+
+And one claim that does \emph{not} survive:
+
+\begin{keybox}
+\textbf{The group-theoretic decode does not work at this error rate.} It is
+worth \DecodeGain\ points on the held-out set and verifies
+\DecodeVerified/\DecodeTrials. This is the most interesting result in the
+report, because the decode is the conceptually strongest part of the design
+--- the output space really is a group, both endpoints really are known, and
+the constraint really is exact. It fails anyway, for a reason that has
+nothing to do with group theory: the constraint arrives \emph{once}, at the
+end, and the cheapest true story on this holdout is already
+\MinGtPathCost\ against an envelope of ${\sim}10$. Constraint density, not
+constraint strength, is the quantity that matters.
+\end{keybox}
+
+\subsection{The catalogue of negative results}
+\label{sec:negatives}
+
+These are more useful than the positive results for anyone deciding what to
+try next, and they are collected here because each one was measured rather
+than reasoned about.
+
+\begin{center}\small
+\begin{tabular}{@{}p{5.4cm}p{9.6cm}@{}}
+\toprule
+\textbf{Intervention} & \textbf{Measured outcome} \\
+\midrule
+Optical flow (RAFT and Farneback) as model input
+  & Significantly \emph{worse} than raw appearance ($p \le 2\times10^{-3}$;
+    54.4\% vs 70.4\%). Clean motion is not what the model wants; appearance
+    beats it. \\
+Richer temporal encodings (3-channel temporal colour vs 12-channel diff
+stack)
+  & Tie. The seed spread exceeded the effect. \\
+An explicit onset-count head (predicting 0/1/2+ onsets per bin) to fix
+crowding
+  & Failed on premise: only 1 of 9 held-out misses was crowding-caused. \\
+Forward algorithm prior (recognise a last-layer algorithm, insert it into
+the beam)
+  & The gate never admits a hypothesis: a median 60\% of the true story's
+    cost is spent before the last layer begins. Inert. \\
+Backward algorithm peel with a trust threshold
+  & Fails its own gate: $-0.6$ points daytime. Identification confidence says
+    a peeled span is probably the right word; it does not say that using it
+    beats what the plain decode already had. \\
+Adding textbook OLL/PLL algorithms to the library
+  & Structurally wrong: the matcher scores the \emph{executed word}, not the
+    resulting permutation, so textbook entries add words this solver never
+    performs. The library is user-specific by construction. \\
+Statistical lighting gates from image statistics
+  & Anti-correlated with the failure they were meant to predict. The clock is
+    the only working predictor. \\
+Pixel-level transforms to close the evening gap (noise injection to restore
+the diff floor, exposure/colour/crop matching)
+  & Flat across every setting tried. The mechanism is not isolated, so a
+    targeted transform is aimed at a guess. \\
+Anchor-selection improvements in the group decode
+  & Oracle ceiling measured at $+0.65$ points; six of eight daytime sessions
+    have \emph{exactly zero} anchor headroom. Built anyway, measured $-0.6$.\\
+Appearance-based swap detection
+  & Dead: a legit solve \emph{completing} is the largest appearance jump in a
+    session. \\
+Half-turns as their own class (\wca{R2})
+  & Worth $\le 0.61$ points ($p = 0.105$), requires relabelling 40\% of the
+    corpus, and silently breaks the QTM anticheat calibration. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The pattern is unmistakable: \textbf{every decoder-side and
+representation-side lever has measured flat, and every data-side lever has
+measured large.} That is what a coverage-limited system looks like.
+
+\subsection{Methodological lessons}
+
+These generalise past this project and are the part of this report most
+worth keeping.
+
+\begin{description}[leftmargin=1.2em,style=nextline,itemsep=4pt]
+\item[A validation split adjacent in time to training is not a holdout.]
+It is 6.2 points optimistic here, and --- worse --- it is optimistic
+\emph{selectively}: it is blind to exactly the interventions that address
+the regimes it does not contain. Two of the four ablation rungs in
+\cref{sec:ablation} were called flat by validation and large by the holdout.
+\item[When a retrain fixes a regime, find out what else changed.] The
+crop-regime incident (\cref{sec:preproc}) attributed a 29-point improvement
+to ``more live training data'' when the real cause was that the evaluation
+had been comparing full-frame-trained weights against cropped test input.
+The same weights, re-scored consistently, went from 61.5\% to 90.6\% with no
+retraining at all.
+\item[A passing consistency check is evidence only about what it can see.]
+The session checker validated the cube-frame product of the labels and was
+structurally blind to camera-frame drift, because its cube model has no
+centres (\cref{sec:labelframe}). It reported 16/16 for weeks.
+\item[Quantify a defect before treating it as a lever.] Window-anchor
+mismatch was real, measurable, and worth 0.3 points. Crowding was real and
+worth 1 of 9 misses. A defect being genuine says nothing about its size.
+\item[State the constructive bound alongside the empirical rejection.] The
+decoy sweep rejects near-miss claims operationally, and
+\cref{eq:decoybound} proves a cheap wrong story exists anyway. Reporting only
+the first would be the easiest available way to oversell this system.
+\item[Report per-session floors, not just means.] A user experiences their
+own solve. A mean of \RawDayMean\% with a floor of \RawMinSA\% is a different
+product from a mean of \RawDayMean\% with a floor of 88\%.
+\end{description}
+
+\subsection{Limitations}
+\label{sec:limitations}
+
+\begin{itemize}[leftmargin=1.3em,itemsep=3pt]
+\item \textbf{$n=1$ solver.} One person, one cube, two rooms, three weeks.
+Nothing here speaks to cross-person generalisation, and the measured
+cross-\emph{day} degradation within one person is a lower bound on it.
+\item \textbf{The training signal requires hardware most users do not own.}
+Every label came from a Bluetooth cube. Scaling the corpus beyond this one
+solver requires either more smart-cube owners or a labelling path that does
+not need one --- a human review tool exists and has never been used at scale.
+\item \textbf{No external baseline.} There is no published system, dataset,
+or prior number to compare against. Every comparison in this report is
+internal, which means it can establish that a change helps but not that the
+absolute level is good.
+\item \textbf{Non-causal model.} Frame $t$ sees one second of future. Fine
+for buffer-then-analyse; a live streaming product would need causal padding
+and would pay for it at the leading edge.
+\item \textbf{The decoder and the recogniser disagree about reference frame}
+on slice-bearing sessions (\cref{sec:decode-results}). Known, unfixed.
+\item \textbf{The evaluation ground truth is itself a model of the world}
+--- the smart cube's move stream, which has 30\,ms tick collisions
+(${\sim}10$\% of moves), up to one frame of alignment noise, and an
+unreliable state query. Ground truth here is good, not perfect.
+\item \textbf{Adversarial evaluation is entirely synthetic.} No recorded
+attack of the one shape that survives the count gate exists.
+\end{itemize}

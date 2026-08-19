@@ -1,0 +1,31 @@
+
+  14 held-out solves x 2 seeds; beam 4000 (retry 16000)
+  cost model: C_DEL=2.6 C_INS=4.0 C_SLICE=1.5 REL_WEIGHT=2.0 MAX_END_INS=4
+
+==============================================================================================
+  move_ctc_spd_s1
+==============================================================================================
+  session                               raw   post  ver  exact    cost  gtcost   decoys accepted
+  solve_20260729_221809_solve         89.5%  87.5%    .      .     nan   76.00              none   [slice]
+  solve_20260730_111941_solve         93.4%  93.4%    .      .     nan   34.45              none
+  solve_20260730_113054_solve         91.7%  91.7%    .      .     nan   42.32              none   [slice]
+  solve_20260731_211018_solve         85.7%  85.7%    .      .     nan   58.25              none
+  solve_20260731_213559_solve         96.3%  96.3%    .      .     nan   19.74              none
+  solve_20260803_095124_solve         90.2%  89.0%    .      .     nan   34.60              none
+  solve_20260803_095533_solve         80.0%  80.7%    .      .     nan   91.36              none   [slice]
+  solve_20260803_100135_solve         91.9%  91.9%    .      .     nan   40.00              none
+  solve_20260803_122920_solve         97.5%  97.5%    .      .     nan   14.61              none
+  solve_20260803_123410_solve         94.3%  94.3%    .      .     nan   22.64              none
+  solve_20260804_214215_solve         87.1%  87.1%    .      .     nan   58.48              none
+  solve_20260804_234927_solve         90.2%  89.1%    .      .     nan   51.71              none
+  solve_20260805_155829_solve         91.9%  92.7%    .      .     nan   62.08              none
+  solve_20260809_155709_solve         76.1%  76.1%    .      .     nan   97.39              none
+  wrote paper\data\m2_decode_s1.json
+
+==============================================================================================
+  SUMMARY
+==============================================================================================
+  move_ctc_spd_s1     daytime   n=9   raw  89.7%  post  89.7%  verified 0/9  exact 0/9  false accepts 0/36
+  move_ctc_spd_s1     evening   n=5   raw  89.8%  post  89.1%  verified 0/5  exact 0/5  false accepts 0/20
+  move_ctc_spd_s1     all       n=14  raw  89.7%  post  89.5%  verified 0/14  exact 0/14  false accepts 0/56
+  wrote paper\data\m2_summary_s1.json

@@ -77,6 +77,7 @@ from continuity_guard import (ContinuityGuard, box_signature,     # noqa: E402
                               dedup_boxes, detect_cubes, EDGE_MARGIN,
                               FRAME_STALL_DQ_S, GAP_DQ_S, GAP_FLAG_S,
                               MULTI_CONF, MULTI_DQ_HITS, PRESENCE_CONF)
+from solved_check import solved_at                       # noqa: E402
 #: `_put` is deliberately NOT imported — see `_text` for why its
 #: outline-plus-fill idiom is what produced doubled glyphs.
 from live_guard_test import SwapMeter, SWAP_REF          # noqa: E402
@@ -89,6 +90,13 @@ from anticheat_gate import (MIN_OBSERVED_MOVES, POST_STOP_MAX_WINDOW_S,
                             separation_tps_limit)          # noqa: E402
 
 DEFAULT_CTC = "checkpoints/move_ctc_spd_s0.pt"
+
+#: Frames taken either side of the timer stop for the solved-at-stop test.
+#: ~0.7s a side at 30fps, matching the 1.5s window solved_check.py's
+#: thresholds were measured over — the constant and the calibration are
+#: coupled, so changing one without re-running `solved_check.py sweep`
+#: invalidates the other.
+STOP_WINDOW_FRAMES = 20
 
 #: Frames are buffered for post-hoc analysis, so the buffer is real memory.
 #: Capped at max side 640 — YOLO's native input is 640 and the crop is
@@ -173,13 +181,18 @@ def count_moves(buffer, fps, detector, model, device, beam=0):
     count computed a slightly different way would not be comparable to the
     corpus numbers the thresholds came from.
 
-    Returns (n_moves, labels, n_detected).
+    Returns (n_moves, labels, n_detected, block) — `block` being the cropped
+    (N, 96, 96, 3) stream the model was scored on. It is returned rather than
+    discarded because the lighting check must run on THOSE pixels: the
+    reference is aggregated over cropped streams, so anything else compares a
+    picture of a room against a distribution of pictures of a cube. See
+    lighting_check.assess.
     """
     from dataset import JointArrayStream
 
     n = len(buffer)
     if n < 8:
-        return 0, [], 0
+        return 0, [], 0, None
 
     # Decoded once into a list rather than per `load` call: `per_frame_boxes`
     # and `build_color_stream` each walk the whole buffer, so a decode-on-
@@ -203,7 +216,7 @@ def count_moves(buffer, fps, detector, model, device, beam=0):
     block = build_color_stream(load, boxes, n)
     stream = JointArrayStream(frames=block, name="live", fps=fps)
     labels = _decode_count(model, stream, device, beam)
-    return len(labels), list(labels), n_detected
+    return len(labels), list(labels), n_detected, block
 
 
 def preflight(ctc_path, detector):
@@ -253,6 +266,13 @@ class Attempt:
 
     def __init__(self, fw, fh):
         self.guard = ContinuityGuard(fw, fh)
+        # A SECOND guard covering the post-stop scan window alone. Not a
+        # duplicate of `guard`: custody over the scan is a much stricter
+        # demand than continuity over a whole attempt, and it can be, because
+        # during the scan the cube is being deliberately presented rather than
+        # manipulated. Whole-session continuity at DQ strength is what drives
+        # the known false-DQ rate; this window has no hands crossing it.
+        self.post_guard = ContinuityGuard(fw, fh)
         self.swap = SwapMeter()
         self.state = "IDLE"
         self.solve_frames: list = []
@@ -295,28 +315,61 @@ class Attempt:
         return sum(b.nbytes for b in self.solve_frames + self.scan_frames) / 1e6
 
 
+def stop_window_solved(att, detector):
+    """Was the cube solved at the timer stop? (solved_check.solved_at)
+
+    The window STRADDLES the stop — the tail of the timed buffer plus the head
+    of the scan buffer — rather than starting at it, for two reasons. The
+    moment of the stop is the worst frame available (a hand is leaving the
+    cube for the keyboard), and a window on one side only would be answering a
+    slightly different question: before the stop is "did they finish", after
+    it is "what are they presenting", and the attack lives exactly in the
+    seam between those.
+
+    Boxes come from `per_frame_boxes`, the same median-smoothed, interpolated
+    path the move count uses, so an occluded frame gets a bridged box instead
+    of a missing one.
+    """
+    pre = att.solve_frames[-STOP_WINDOW_FRAMES:]
+    post = att.scan_frames[:STOP_WINDOW_FRAMES]
+    buf = pre + post
+    if len(buf) < 8:
+        return {"solved": None, "reason": "too_few_frames",
+                "n_regions": None, "n_frames": len(buf)}
+
+    frames = [_decode(b) for b in buf]
+    n = len(frames)
+    if detector is None:
+        return {"solved": None, "reason": "no_detector",
+                "n_regions": None, "n_frames": n}
+    boxes, _ = per_frame_boxes(detector, lambda i: frames[i] if 0 <= i < n
+                               else None, n)
+    return solved_at(list(zip(frames, boxes)))
+
+
 def adjudicate_attempt(att, fps, detector, model, device, beam, lighting_ref):
     """Close the attempt: decode both windows, build evidence, adjudicate."""
     t0 = time.perf_counter()
 
-    n_moves, labels, n_det = count_moves(
+    n_moves, labels, n_det, block = count_moves(
         att.solve_frames, fps, detector, model, device, beam)
-    n_after, _, _ = count_moves(
+    n_after, _, _, _ = count_moves(
         att.scan_frames, fps, detector, model, device, beam)
 
-    # Lighting. Only `False` causes an abstention — `None` means "not
-    # assessed" and is deliberately harmless, so a missing reference cannot
-    # silently push every attempt into review.
-    lighting_ok = None
-    if lighting_ref is not None and att.solve_frames:
-        try:
-            from lighting_check import compare, frame_stats
-            stats = frame_stats(np.asarray(att.solve_frames[::5]))
-            worst = max((abs(d["z"]) for d in compare(stats, lighting_ref)),
-                        default=0.0)
-            lighting_ok = worst < 3.0
-        except Exception:
-            lighting_ok = None
+    # Lighting, on the CROPPED block the model was scored on. Only `False`
+    # causes an abstention — `None` means "not assessed" and is deliberately
+    # harmless, so a missing reference cannot silently push every attempt
+    # into review.
+    #
+    # This used to read `frame_stats(np.asarray(att.solve_frames[::5]))`,
+    # which fed JPEG-ENCODED BUFFERS to a function expecting an (N,H,W,3)
+    # array. It raised AxisError on every attempt, the bare `except` swallowed
+    # it, and `lighting_ok` was therefore None on every run this program has
+    # ever done — the lighting abstention has never once fired live. Two
+    # separate faults, worth keeping named: the wrong pixels, and an
+    # `except Exception` broad enough to make a permanent failure invisible.
+    from lighting_check import assess
+    lighting_ok = assess(block, lighting_ref)
 
     # Capture rate is a temporal scale factor on the count (see TRAIN_FPS).
     # Far enough off and the honest answer is that the count is unreadable —
@@ -324,6 +377,8 @@ def adjudicate_attempt(att, fps, detector, model, device, beam, lighting_ref):
     # being reported as a number that would reject a legitimate solve.
     fps_off = abs(fps - TRAIN_FPS) / TRAIN_FPS
     fps_bad = fps_off > FPS_TOLERANCE
+
+    solved = stop_window_solved(att, detector)
 
     rep = att.guard.report()
     ev = SolveEvidence(
@@ -341,6 +396,12 @@ def adjudicate_attempt(att, fps, detector, model, device, beam, lighting_ref):
         swap_jump=None,
         swap_threshold=None,
         lighting_ok=lighting_ok,
+        # Unlike the swap meter above, these two ARE wired into the verdict:
+        # both are calibrated. `solved_at_stop`'s threshold is measured at a
+        # zero-false-DQ operating point held out by date (solved_check.py),
+        # and post-stop custody reuses the guard's existing constants.
+        solved_at_stop=solved,
+        post_stop_continuity=att.post_guard.report(),
     )
     verdict = adjudicate(ev)
 
@@ -717,6 +778,8 @@ def main():
                 sig = (box_signature(frame, max(deduped, key=lambda b: b[4]))
                        if deduped else None)
                 att.guard.update(t, boxes, sig)
+                if att.state == "SCANNING":
+                    att.post_guard.update(t, boxes, sig)
                 att.swap.update(t, sig)
                 att.buffer(frame)
 

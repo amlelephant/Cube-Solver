@@ -1,0 +1,243 @@
+\section{Decoding}
+\label{sec:decode}
+
+There are two searches, and conflating them is the single most common source
+of confusion about this system. The first turns a posteriorgram into a move
+string. The second turns a move string into a move string that is
+\emph{algebraically possible}. They have different objectives, different
+failure modes, and --- crucially --- different standing as evidence.
+
+\subsection{Why not peak-picking}
+\label{sec:peakpick}
+
+The obvious decoder for a per-frame onset score is: threshold, find local
+maxima at least $m$ frames apart, emit one move per maximum, read the class
+head at that frame. It has three failure modes, all of which were measured.
+
+\begin{enumerate}[leftmargin=1.4em,itemsep=2pt]
+\item \textbf{Merged humps.} Two turns closer than $m$ frames become one
+symbol. Raising $m$ loses fast pairs; lowering it invents phantoms in the
+shoulders of a single hump. In this corpus 34\% of sub-150\,ms pairs arrive
+as one merged hump at the tuned operating point.
+\item \textbf{Constants tuned on the wrong regime.} $m$ and the target width
+$\sigma$ were both tuned on 2026-07-21 footage containing almost no fast
+moves (2.5\% of pairs under 100\,ms). Against footage where 28\% of onsets
+have a neighbour under 150\,ms, retuning $m: 3\to2$ and $\sigma: 2\to1$ moved
+sub-150\,ms recall from 73.8\% to 83.5\%. \emph{A decoder constant tuned on
+one speed regime silently becomes a ceiling in another, and from the outside
+it looks exactly like a model limitation.}
+\item \textbf{Premature commitment.} The candidate list is fixed before any
+downstream evidence is consulted. This is the structural objection and it is
+not fixable by tuning.
+\end{enumerate}
+
+\subsection{CTC prefix beam search}
+\label{sec:prefixbeam}
+
+The decoder must approximate
+$\hat\ell = \arg\max_\ell p(\ell\mid x)$ where $p(\ell \mid x)$ is the sum
+over alignments in \cref{eq:ctcmarginal}. Best-path decoding (per-frame
+argmax, then collapse) maximises the probability of a single \emph{path},
+which is a different thing, and the two differ exactly when the model is
+uncertain --- which is the regime of interest. \cref{sec:main-results}
+measures the gap: \GreedyGap\ points.
+
+Prefix beam search \cite{hannun2014} maintains a set of prefixes, each
+carrying two accumulators:
+\begin{align}
+p_b(\ell, t) &= \Pr[\text{paths over frames } 1{:}t
+   \text{ that collapse to } \ell \text{ and end in blank}],\\
+p_{nb}(\ell, t) &= \Pr[\text{same, ending in a non-blank symbol}].
+\end{align}
+The split exists to express the repeat rule. Extending prefix $\ell$ by
+symbol $c$ at frame $t$:
+\begin{equation}
+p_{nb}(\ell c, t) \mathrel{+}= y^t_c \cdot
+\begin{cases}
+p_b(\ell, t-1) & \text{if } c = \mathrm{last}(\ell),\\
+p_b(\ell,t-1) + p_{nb}(\ell,t-1) & \text{otherwise,}
+\end{cases}
+\label{eq:extend}
+\end{equation}
+because a repeat of the last symbol only creates a \emph{new} emission if
+the previous frame was blank; otherwise it merely extends the existing
+emission, which contributes to $p_{nb}(\ell,t)$ rather than to
+$p_{nb}(\ell c,t)$. Staying blank carries $\ell$ forward:
+$p_b(\ell,t) \mathrel{+}= y^t_\varnothing (p_b(\ell,t-1)+p_{nb}(\ell,t-1))$.
+Prefixes are ranked by $\log(p_b+p_{nb})$ and pruned to the beam width (16
+here). Everything is in log space: over a 1600-frame session, linear
+probabilities underflow within a few hundred frames and the beam silently
+degenerates to whatever ties at zero.
+
+\paragraph{Frames are approximate.} A prefix is reached by many alignments
+that disagree about which frame emitted which symbol, so each prefix keeps
+the frame list of its single largest contribution. Nothing downstream uses
+those frames for cost --- only for ordering and reporting --- so the
+approximation never enters a score.
+
+\paragraph{Language-model fusion, and why it is off.} Shallow fusion,
+$\mathrm{rank}(\ell) = \log p_{\text{ctc}}(\ell) + \alpha \log
+p_{\text{lm}}(\ell) + \beta|\ell|$, was implemented and measured. It helps
+consistently across days (MER $17.3\to9.8$ and $17.1\to12.2$ by seed) and
+\emph{flips sign} on the same-day validation split, because one global
+$\beta$ cannot serve both regimes. It is off by default. The $\beta$ term is
+not a hack: any language model systematically prefers shorter sequences, so
+without an explicit per-symbol insertion bonus, fusion trades phantoms for
+misses rather than reducing error.
+
+\subsection{What CTC's independence assumption costs}
+\label{sec:ctc-limits}
+
+\Cref{eq:pathprob} factorises the path probability across frames, which
+means the model has \emph{no} way to express ``having just emitted
+\wca{R}, \wca{R'} is now unlikely''. All sequence-level structure has to be
+carried implicitly by the trunk's receptive field --- 61 frames, about two
+seconds, or roughly five turns at the corpus's median rate. Anything longer
+range than that is invisible to the objective.
+
+For this domain that is a real limitation, because the output has enormous
+long-range structure: the last third of a solve is drawn from a repertoire
+of a few dozen memorised words, and a solver's move distribution is far from
+i.i.d. Two remedies exist and both were tried.
+
+\begin{itemize}[leftmargin=1.3em,itemsep=2pt]
+\item \emph{Shallow fusion with a move language model} (above). Helps
+cross-day, hurts same-day, sign-unstable --- off by default.
+\item \emph{An explicit algorithm prior} in the group decoder --- recognise a
+known last-layer word and insert it as a single beam transition. Measured
+inert in the forward direction and net negative in the backward direction
+(\cref{sec:negatives}).
+\end{itemize}
+
+The honest reading is that neither failed because sequence structure is
+absent --- it is obviously present --- but because both were applied
+\emph{after} the frame-level model had already lost the evidence. A model
+that conditions on its own emission history (an RNN-transducer or an
+attention decoder) would carry the prior where it can still change what is
+recognised. That is the most defensible architectural change available and
+it has not been tried.
+
+\subsection{The group-theoretic decode}
+\label{sec:reconstruct}
+
+\paragraph{Setup.} We have a start state $s_0 \in G$ (the server-issued
+scramble, known exactly), an end state (solved, $e$), and a detected
+sequence of $n$ onsets, each with a 12-way posterior $p_j$ over classes.
+We want the most probable move word $w$ such that $s_0 \cdot w = e$.
+
+Model the recogniser as a noisy channel with three error types --- the
+alignment operations of \cref{sec:experiments}: a \emph{substitution} (onset
+detected, named wrong), a \emph{phantom} (spurious onset), a \emph{miss}
+(onset never emitted). A hypothesis is a sequence of edit decisions; its cost
+is a sum of negative log-probabilities, so minimising cost is MAP estimation.
+
+\paragraph{The cost model.} For onset $j$, accepting class $k$ costs
+\begin{equation}
+c_j(k) \;=\; \log \max_i q_j(i) \;-\; \log q_j(k),
+\qquad
+q_j \;=\; (1-\rho_j)\,p_j \;+\; \tfrac{\lambda_u}{12}\mathbf{1}
+        \;+\; \lambda_i u_j\, \delta_{\mathrm{inv}(\arg\max p_j)},
+\label{eq:acceptcost}
+\end{equation}
+where $u_j = 1 - \max_i p_j(i)$ is the onset's uncertainty and
+$\rho_j = \lambda_i u_j + \lambda_u$. Accepting the model's own argmax is
+free by construction; everything else is priced by how far the smoothed
+posterior falls short of it. Two smoothing terms are added because the raw
+softmax is badly calibrated in a specific, measured way: it is overconfident
+precisely on the temporal inverse (\wca{U} versus \wca{U'}), so
+$\lambda_i = 0.20$ of prior mass, scaled by the onset's own uncertainty, is
+moved onto the inverse class, plus a flat $\lambda_u = 0.04$ uniform floor.
+
+Deleting onset $j$ (declaring it a phantom) costs
+$C_{\mathrm{del}} + w\cdot(\text{onset strength})$ with
+$C_{\mathrm{del}}=2.6$. Making deletion depend on strength is not a
+refinement, it is load-bearing: with a flat deletion cost the beam drowns in
+``delete something here, insert something there'' pairs --- there are
+$O(n^2\cdot 12)$ of them, they are parity-balanced, and they are all cheaper
+than a true multi-substitution story. Onset strength is genuine evidence
+against deletion and pricing it removes the flood.
+
+Inserting a move (recovering a miss) costs a flat $C_{\mathrm{ins}} = 4.0$,
+roughly $-\log$ of the miss odds plus the 12-way choice of which move.
+
+\paragraph{Why beam search and not exact search.} At the measured error rate
+an exact IDA* over edit cost is hopeless, because the constraint that kills
+wrong hypotheses --- ``does this reach solved'' --- only pays off at the
+\emph{end} of the sequence. At a budget sufficient for ten edits the tree
+explodes long before pruning bites. So: keep the $K$ cheapest hypotheses per
+onset ($K = 4000$, retried at $16000$), deduplicated by cube state, ranked
+by cost-so-far plus an admissible lookahead.
+
+\paragraph{The lookahead.}
+\label{sec:heuristic}
+Three components, two of them true lower bounds.
+\begin{itemize}[leftmargin=1.3em,itemsep=2pt]
+\item \emph{Pattern databases.} Breadth-first tables over the corner-twist,
+edge-flip and UD-slice coordinates give an admissible quarter-turn distance
+from any state to solved; the max over tables is used.
+\item \emph{Parity.} Every quarter turn flips permutation parity
+(\cref{sec:background}), so a hypothesis whose achievable remaining move
+count has the wrong parity provably needs a further insertion or deletion.
+\item \emph{A suffix-consistency ladder.} This one is the interesting part.
+Precompute $S_j$, the group product of the \emph{remaining} detected moves as
+classified. A hypothesis is consistent with the rest of the detections iff
+$\mathrm{rel} = \mathrm{state}\cdot S_j$ is the identity. Grading ``almost
+consistent'' by pattern distance does \emph{not} work --- a conjugated error
+scrambles the coordinate metrics, so $h(\mathrm{rel})$ measures $20\pm3$ for
+\emph{any} hypothesis with at least one unfixed error regardless of how many,
+and feeding that noise into the ranking evicts the true hypothesis. What
+works is exact algebra: $\mathrm{rel}$ is repairable by one future insertion
+of $m$ at gap $q$ iff $\mathrm{rel} = S_q^{-1} m^{-1} S_q$, by one future
+deletion of detection $q$ iff $\mathrm{rel} = S_{q+1}^{-1} d_q S_{q+1}$, and
+by one future substitution of $m$ for $d_q$ iff
+$\mathrm{rel} = S_{q+1}^{-1}(m^{-1}d_q)S_{q+1}$. Those $\sim\!25n$ elements
+go into a hash set; the ranking adds a weight per ``level'' (0 = consistent
+now, 1 = one edit away, capped otherwise). It is noise-free, and the moment a
+hypothesis has repaired everything but one discrepancy it out-ranks the
+cheap procrastinators an absolute-cost beam would bury it under. It is a
+ranking term, never a hard prune.
+\end{itemize}
+
+\paragraph{The tail is exact.} After the last onset, each candidate end state
+is finished by iterative-deepening search over words of length
+$\le M_{\mathrm{end}} = 4$, pruned by the full pattern-database bound. This
+covers end-of-solve moves the camera never saw. \textbf{The small budget is
+what keeps the whole thing sound}: every state is within 26 quarter turns of
+solved, so with a generous budget \emph{every} branch ``verifies'' and the
+result means nothing.
+
+\subsection{What the group decode can and cannot repair}
+\label{sec:decode-limits}
+
+The endpoint constraint is \emph{global and terminal}. It discriminates
+nothing until the last onset. A session that cannot complete a consistent
+path to solved therefore receives only generic smoothing, and all of the
+decode's power concentrates in sessions that were nearly right already. This
+is why the measured contribution is about a point (\cref{sec:decode-results})
+rather than the large number the framing suggests.
+
+Per channel:
+\begin{itemize}[leftmargin=1.3em,itemsep=2pt]
+\item \textbf{Substitutions} are the channel the constraint fixes nearly for
+free --- the group pins down which move a mis-named onset must have been. It
+is also the \emph{smallest} channel (\SubShare\% of error mass).
+\item \textbf{Phantoms} are cheap to delete when the onset was weak.
+\item \textbf{Misses} force the decoder to invent a move with no posterior
+evidence at all: a 12-way guess whose only support is an endpoint dozens of
+moves away. They are \MissShare\% of the error mass, i.e.\ most of it.
+\end{itemize}
+
+The envelope is best stated in \emph{cost}, not error count, because cost is
+what actually binds. Measured on synthetic corruptions and on a real replay:
+a true story costing ${\sim}6$ survives 90 onsets at beam 4000; one costing
+${\sim}10$ does not, and each insertion is a flat 4.0. So there is roughly
+\emph{one insertion of headroom beyond whatever the recogniser's own mistakes
+already cost.} Buying down recognition error buys miss recovery for free;
+widening the beam does not.
+
+That envelope is the whole story of \cref{sec:decode-results}: on the
+held-out set the cheapest true story costs \MinGtPathCost\ and the median
+costs \MedGtPathCost, so nothing is within reach and the decode's measured
+contribution is \DecodeGain\ points. A decoder with exactly one anchor, at
+the very end, cannot help a sequence that needs a dozen insertions to reach
+it.

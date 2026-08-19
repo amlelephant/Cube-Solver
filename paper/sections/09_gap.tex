@@ -1,0 +1,136 @@
+\section{What would have to be true for this to be a paper}
+\label{sec:gap}
+
+This section is the point of the document. The measurements above are real,
+but a venue would reject this work as written, and it is worth being precise
+about why --- most of the objections are about evidence, not method, and
+several are cheap to fix.
+
+\subsection{Blocking gaps}
+
+\paragraph{G1. The corpus is one person.} Every reviewer's first question
+will be whether the model has learned ``how a cube turns'' or ``how
+\emph{this} person's hands look''. \cref{sec:ladder} shows a
+\LadderTrainMinusHeld-point degradation across \emph{days} within one
+person; across people it will be larger, and the direction is not in doubt.
+
+\emph{What fixes it:} 5--10 additional solvers, ${\sim}10$ solves each,
+different cubes, different rooms. With BLE labels that is a hardware
+constraint; without them it needs the human-review labelling path. A
+leave-one-solver-out protocol then becomes possible, and that --- not the
+number in \cref{tab:main} --- is the result a paper reports.
+
+\paragraph{G2. There is no baseline.} Every number here is internal.
+\cref{sec:ablation} establishes that the pipeline improved, not that it is
+good.
+
+\emph{What fixes it:} at minimum (a) a classical-CV baseline --- frame
+differencing plus optical-flow direction voting --- so the learned model has
+a floor to beat; (b) a strong generic video-classification baseline, e.g.\ a
+small video transformer or an inflated 3-D CNN on the same clips, to show the
+domain-specific architecture earns its specificity; (c) an off-the-shelf
+CTC-over-frozen-features baseline. All three are days of work, not weeks,
+and the third is the one most likely to embarrass the current design.
+
+\paragraph{G3. The evaluation set is too small to attribute anything.}
+\cref{sec:regime} documents an honest attempt at attribution collapsing
+under multiple comparisons at $n=8$; this report's $n=\NHoldoutSolves$ does
+not fix it. Statements of the form ``lighting causes the gap'' currently
+rest on a single controlled lamp intervention.
+
+\emph{What fixes it:} 40--60 held-out solves stratified by lighting, speed
+and solver, which makes a two-way analysis possible and lets a
+Bonferroni-corrected regime claim survive.
+
+\paragraph{G4. The adversarial evaluation contains no adversary.}
+\cref{sec:anticheat-results}'s catch rate is a proxy. Any security venue
+rejects on this alone.
+
+\emph{What fixes it:} record the attacks. Specifically the one that survives
+the count gate --- plausible moves without solving, then a swap, including
+the table-edge variant --- plus genuine solver-following, plus
+timer-stop-then-solve. Twenty of each is enough to state a ROC rather than a
+count.
+
+\subsection{Fixable weaknesses that would draw fire}
+
+\begin{description}[leftmargin=1.2em,style=nextline,itemsep=4pt]
+\item[The intervals are wide, and two headline claims do not survive them.]
+This draft \emph{does} bootstrap over sessions and test the ablation
+pairwise (\cref{sec:ablation}), which was originally on this list --- and
+doing it changed the story. The CTC migration, the project's headline
+architectural change, comes out at \DCtcVsPeak\ points with a CI spanning
+zero. Photometric augmentation is marginal. Only the two data interventions
+survive. Any future claim needs the same treatment \emph{before} it is
+written down, not after.
+\item[The regime split is not statistically separated.] Daytime
+\CIDayMean\% [\CIDayLo, \CIDayHi] and evening \CIEveMean\%
+[\CIEveLo, \CIEveHi] overlap substantially at $n=9$ and $n=5$. The lamp
+intervention is stronger evidence for the causal claim than the split is,
+and it is a single controlled comparison.
+\item[The frame-reference defect is live in the repository.] Every harness
+except this report's scores against cube-frame truth
+(\cref{sec:labelframe}). Small, but it is the kind of thing a careful
+reviewer finds and then distrusts everything else.
+\item[The decoder's cost constants are unjustified.] $C_{\rm del}=2.6$,
+$C_{\rm ins}=4.0$, $\lambda_i=0.20$, $\lambda_u=0.04$ are described as
+$-\log$ of measured odds but were never re-derived after the recogniser
+changed twice. They should be re-fit on held-out sessions, or at least a
+sensitivity sweep reported.
+\item[The prediction bias toward the U layer (\cref{sec:erroranalysis}) is
+unaddressed.] \PredUShare\% of substitution predictions are \wca{U}/\wca{U'}.
+Class-balanced loss or a logit prior correction is a one-line experiment.
+\item[The spatial average pool discards where the motion was.] The single
+most obvious architectural question --- does a model that retains coarse
+spatial structure name faces better? --- has never been asked, and
+\SubAdjacent\% of substitutions are wrong-face errors.
+\item[The abstain path is untested end to end.] The count gate has three
+tiers, and no held-out session has ever triggered \texttt{REVIEW}. That means
+the abstain logic is unexercised, not that it is reliable.
+\item[The post-stop phantom rate is extrapolated.] Calibrated on 1--3\,s
+session tails and applied to a window of tens of seconds.
+\end{description}
+
+\subsection{Things that would make it a genuinely interesting paper}
+
+Not required, but these are what would give it a thesis rather than a
+system description.
+
+\begin{enumerate}[leftmargin=1.4em,itemsep=4pt]
+\item \textbf{``Structured output as a substitute for accuracy.''} The
+sharpest idea in the system is that a hard algebraic constraint on the output
+space converts an impossible sequence-level problem into a tractable one ---
+and the honest finding (\cref{sec:decode-results}) is that at this error
+rate it does \emph{nothing at all}, for a specific and generalisable reason:
+the constraint is terminal, so it discriminates nothing until the end.
+Quantifying the relationship between \emph{constraint density} and recovery
+--- by artificially injecting mid-solve state observations at varying spacing
+and measuring where recovery switches on --- would turn a null result into a
+finding. It is a clean, cheap experiment, it needs no new data, the current
+0/\DecodeTrials\ is the $d=\infty$ endpoint of its own curve, and the result
+would transfer to any constrained-decoding setting. \textbf{This is the one
+experiment I would actually run next.}
+\item \textbf{``Counting is robust where identification is not.''} The
+anticheat result is the strongest here, and its structure is general: when
+identification is unreliable, find a decision that depends only on a
+statistic the model estimates well, and bound that statistic with a theorem
+rather than a fit. The verification cliff at ${\sim}98\%$ versus the count
+gate's tens-of-moves margin is a crisp illustration.
+\item \textbf{An honest negative-result paper on the evaluation trap.}
+\cref{sec:ablation}'s finding --- that the validation split was structurally
+blind to the two largest interventions, and that both were shipped or nearly
+discarded on its say-so --- is a better contribution than any accuracy
+number in this document.
+\end{enumerate}
+
+\subsection{The order I would do these in}
+
+\begin{enumerate}[leftmargin=1.4em,itemsep=2pt]
+\item Fix the frame-reference defect in the repository's harnesses, and
+enable persistent orientation in the group decoder (one day).
+\item The constraint-density experiment (item 1 above) --- no new data, and
+it is the potential thesis.
+\item Recruit 5--10 solvers. Everything else is gated on this.
+\item Record the attacks.
+\item Baselines.
+\end{enumerate}

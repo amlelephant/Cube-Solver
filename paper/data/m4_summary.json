@@ -1,0 +1,52 @@
+[
+  {
+    "rung": "peak-pick (joint)",
+    "tag": "move_joint_base",
+    "daytime": 0.7817443299148761,
+    "evening": 0.6394857604614568,
+    "all": 0.7309376979672263,
+    "daytime_spread": 0.026912180235592165,
+    "evening_spread": 0.0738339059375911,
+    "all_spread": 0.04366993941487762
+  },
+  {
+    "rung": "CTC",
+    "tag": "move_ctc",
+    "daytime": 0.8191664644676684,
+    "evening": 0.6097808134362226,
+    "all": 0.7443858748135807,
+    "daytime_spread": 0.0037086202436615867,
+    "evening_spread": 0.018992529633261923,
+    "all_spread": 0.004398933283811246
+  },
+  {
+    "rung": "CTC + photo-aug",
+    "tag": "move_ctc_aug",
+    "daytime": 0.825969622205872,
+    "evening": 0.732594244857521,
+    "all": 0.7926212731528894,
+    "daytime_spread": 0.00943213806395371,
+    "evening_spread": 0.03586188317704142,
+    "all_spread": 0.018871332747199543
+  },
+  {
+    "rung": "CTC + photo-aug + 6 sessions",
+    "tag": "move_ctc_aug44",
+    "daytime": 0.8602661895634298,
+    "evening": 0.7869820206855638,
+    "all": 0.8340932721070491,
+    "daytime_spread": 0.01565919583228792,
+    "evening_spread": 0.054022842379979674,
+    "all_spread": 0.00922724638637884
+  },
+  {
+    "rung": "CTC + photo + speed aug",
+    "tag": "move_ctc_spd",
+    "daytime": 0.907055952720301,
+    "evening": 0.8760978428914197,
+    "all": 0.8959994849242722,
+    "daytime_spread": 0.009326741813789563,
+    "evening_spread": 0.04814996428268736,
+    "all_spread": 0.011200653220666545
+  }
+]

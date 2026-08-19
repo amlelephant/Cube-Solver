@@ -251,6 +251,16 @@ def timing_report(times, thr: float | None = None) -> dict:
                              if n_exec_intervals > 1
                              and ioi[~is_pause].mean() > 0 else None),
 
+        # -- rate over the solve ---------------------------------------------
+        #: The shape of the solve rather than one number for it. Measured
+        #: 2026-08-10, both seeds, 14 held-out solves: 6.8% median daytime
+        #: (9.9% worst) and 10.2% evening (14.0% worst) — the only rate
+        #: metric here that stays reportable in BOTH regimes. Its rejected
+        #: alternative, `slowdown_ratio`, re-measured 10.5-15.9% daytime and
+        #: 12.2-21.2% evening on the same run, so the curve beats the ratio
+        #: in every cell. See tps_curve.
+        "tps_curve": tps_curve(t),
+
         # -- cluster structure ----------------------------------------------
         "n_bursts": len(bs),
         "burst_sizes": sizes,
@@ -265,6 +275,82 @@ def timing_report(times, thr: float | None = None) -> dict:
         "median_pause_s": round(float(np.median(ioi[is_pause])), 3)
         if is_pause.any() else 0.0,
     }
+
+
+#: Moves per window of the TPS curve. Small enough to resolve structure
+#: inside a solve (an F2L pair is ~7-10 QTM, so k=5 sits below one algorithm
+#: and can show the shape *within* it) and large enough that one interval
+#: cannot dominate a point. Not tuned: 5 is what TODO.md §7D specified, and
+#: the accuracy measurement below is at that value, so changing it
+#: invalidates the number.
+TPS_CURVE_K = 5
+
+
+def tps_curve(times, k: int = TPS_CURVE_K) -> list[dict]:
+    """
+    Turn rate over the course of the solve: a sliding k-move window.
+
+    WHY A CURVE AND NOT A SLOWDOWN NUMBER. The obvious summary — "how much
+    slower is the last third than the first" — was built and measured and is
+    the wrong shape. `slowdown_ratio` is one noisy estimate divided by
+    another, which §7C measured as the second-worst statistic kind in the
+    table (15-18% median error), so it is deliberately NOT returned here.
+    Each point of this curve is a `mean` over its window, which is the kind
+    that survives.
+
+    WHY IT DOES NOT COLLAPSE THROUGH A PAUSE. Rate-per-window is
+    `(k-1) / span`, so a window straddling a 3-second think reads as a low
+    rate, not a zero and not a gap. A fixed-time window would have to report
+    zero moves per second there, which is both wrong (the solver did not
+    stop being a solver) and undrawable. This also makes the curve
+    scale-free: it has the same number of points for a 40-move solve and a
+    70-move one.
+
+    Returns one dict per window:
+
+        t        midpoint of the window in seconds, the x-axis
+        t_start  first onset in the window
+        t_end    last onset in the window
+        i        index of the first move, for cross-referencing the move list
+        tps      (k-1) / (t_end - t_start), QTM
+
+    Empty for fewer than `k` onsets: a window shorter than k moves is a
+    different statistic with a different variance, and quietly returning one
+    would put two incomparable things on the same axis.
+    """
+    t = np.asarray(times, dtype=np.float64)
+    if t.size < k or k < 2:
+        return []
+    out = []
+    for i in range(t.size - k + 1):
+        span = float(t[i + k - 1] - t[i])
+        if span <= 0:
+            continue
+        out.append({"i": int(i),
+                    "t": round(float(t[i] + span / 2), 3),
+                    "t_start": round(float(t[i]), 3),
+                    "t_end": round(float(t[i + k - 1]), 3),
+                    "tps": round((k - 1) / span, 3)})
+    return out
+
+
+def tps_curve_at(times, grid, k: int = TPS_CURVE_K):
+    """
+    The curve sampled at arbitrary times — how two curves get compared.
+
+    Truth and decode produce different numbers of windows (they disagree
+    about how many moves there were), so the curves cannot be compared point
+    for point by index. They do share a wall clock, so resampling both onto
+    one time grid is the comparison that means something. Held flat outside
+    the curve's own span rather than extrapolated, since a rate estimated
+    off the end of the evidence is not an estimate.
+    """
+    c = tps_curve(times, k)
+    if not c:
+        return None
+    xs = np.array([p["t"] for p in c], dtype=np.float64)
+    ys = np.array([p["tps"] for p in c], dtype=np.float64)
+    return np.interp(np.asarray(grid, dtype=np.float64), xs, ys)
 
 
 def sweep_threshold(times, factors=(2.0, 2.5, 3.0, 4.0, 5.0)) -> list[dict]:

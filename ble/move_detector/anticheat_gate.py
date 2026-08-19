@@ -233,6 +233,12 @@ class SolveEvidence:
     swap_jump: float | None = None             # swap_check.session_jump()[0]
     swap_threshold: float | None = None        # from swap_check_baseline.npz
     lighting_ok: bool | None = None            # None = not assessed
+    # solved_check.solved_at() over the frames straddling the timer stop.
+    # {"solved": True|False|None, ...}; None means the window was unreadable.
+    solved_at_stop: dict | None = None
+    # ContinuityGuard.report() over the POST-STOP window alone — not the same
+    # object as `continuity`, which covers the whole attempt. See adjudicate().
+    post_stop_continuity: dict | None = None
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -309,6 +315,53 @@ def adjudicate(ev: SolveEvidence) -> dict:
             and ev.swap_jump > ev.swap_threshold):
         reasons.append(f"appearance_jump:{ev.swap_jump:.4f}>"
                        f"{ev.swap_threshold:.4f}")
+
+    # -- 1b. the enough-moves-then-swap attack: a full solve's worth of real
+    #        moves on a cube that never got solved, then a solved cube
+    #        substituted before the scan. The count is genuine so §1 passes
+    #        it, and appearance cannot see it because the two cubes are
+    #        chosen identical. What it cannot fake is the cube ON CAMERA AT
+    #        THE STOP, which is still scrambled — the substitution has not
+    #        happened yet.
+    #
+    #        The two halves are one test and only work together:
+    #          * solved-at-stop says the cube was solved when the clock
+    #            stopped;
+    #          * post-stop custody says it is still the SAME object when the
+    #            scan validates it.
+    #        Either alone leaves the swap a window to happen in. Custody is
+    #        demanded only over the post-stop window, not the whole attempt,
+    #        because that window is short and deliberate — the cube is being
+    #        presented, not manipulated — whereas whole-session continuity at
+    #        DQ strength is what drives the known false-DQ rate.
+    if ev.solved_at_stop is not None:
+        st = ev.solved_at_stop.get("solved")
+        if st is False:
+            # NOT exempt from the lighting abstention, unlike continuity and
+            # appearance. Those read geometry and are independent of the move
+            # model; this reads COLOUR, and its measured failure mode is
+            # specifically a lighting one — in warm evening light the
+            # background classifies as a solid region and the statistic
+            # breaks. Letting a colour test reject in the light it is known
+            # to fail in is how a false DQ ships.
+            if ev.lighting_ok is False:
+                abstain.append("solved_at_stop_unreadable:lighting")
+            else:
+                reasons.append(
+                    f"not_solved_at_timer_stop:"
+                    f"{ev.solved_at_stop.get('n_regions')}regions>"
+                    f"{ev.solved_at_stop.get('threshold')}")
+        elif st is None:
+            # Occlusion at the stop is ordinary — hands are still on the cube
+            # — and it pushes the statistic toward "scrambled", so an
+            # unreadable window must abstain. This is also the evasion path
+            # (present the cube badly on purpose), and review is the right
+            # answer to it.
+            abstain.append("solved_at_stop_unreadable")
+    if (ev.post_stop_continuity is not None
+            and ev.post_stop_continuity.get("verdict") == "dq"):
+        reasons += [f"post_stop_custody:{r}"
+                    for r in ev.post_stop_continuity.get("dq_reasons", [])]
 
     # -- 2. conditions that make the MOVE COUNT unreadable.
     if ev.observed_moves is None:
@@ -613,9 +666,15 @@ def cmd_calibrate_poststop(args):
         print(f"  phantoms per 10s: mean {per10.mean():.2f} "
               f"p90 {np.percentile(per10, 90):.2f} max {per10.max():.2f}")
         print(f"  worst absolute count on a move-free tail: {raw_n.max()}")
-        print(f"  -> POST_STOP_MOVE_LIMIT must exceed "
-              f"{per10.max():.2f} x (post-stop window seconds / 10), "
-              f"currently {POST_STOP_MOVE_LIMIT}")
+        # The limit is a RATE, not a constant (see POST_STOP_PHANTOM_RATE), so
+        # what has to clear the worst measurement is the rate itself.
+        print(f"  -> POST_STOP_PHANTOM_RATE must exceed {per10.max():.2f} "
+              f"per 10s, currently {POST_STOP_PHANTOM_RATE:.2f}"
+              + ("" if POST_STOP_PHANTOM_RATE > per10.max()
+                 else "   <-- DOES NOT; this rate would false-DQ"))
+        print(f"     over a {POST_STOP_MAX_WINDOW_S:.0f}s window that allows "
+              f"{post_stop_limit(POST_STOP_MAX_WINDOW_S)} moves against a "
+              f"real solve's >={MIN_OBSERVED_MOVES}")
 
     out = Path(f"poststop_phantoms_{Path(args.ctc).stem}.json")
     out.write_text(json.dumps(rows, indent=2))

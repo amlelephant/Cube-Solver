@@ -591,6 +591,48 @@ def box_signature(frame, box):
     return (hist / total).tolist() if total > 0 else None
 
 
+def run_guard(frames_iter, fw, fh, times=None, fps=30.0, stride=1,
+              guard=None):
+    """
+    Drive a ContinuityGuard over an iterator of (index, frame) and return it.
+
+    THE ONE DRIVER. `_analyze`, `live_anticheat.py`'s main loop and
+    `verify_solve.py`'s post-hoc pass all need the identical four steps —
+    detect, dedup, signature, update — and any drift between them would show
+    up as a verdict that depends on which program asked. Returning the guard
+    rather than its report lets a caller keep updating it or read
+    intermediate state; call `.report()` for the verdict.
+
+    `times`, when given, is the real capture timestamp per frame (seconds,
+    ascending, indexed the same way `frames_iter` yields). Prefer it over
+    `fps`: the guard's gap and cadence tests are wall-clock tests
+    (GAP_DQ_S, FRAME_STALL_DQ_S), so feeding them `idx / mean_fps` hides
+    exactly the stall a cadence check exists to catch — a capture that
+    dropped to 8fps for a second looks perfectly regular on a nominal
+    clock. `times` are re-based to the first frame, so a post-hoc run over
+    a buffered window reproduces what a live run would have seen.
+
+    A post-hoc run IS equivalent to a live one here, which is why this is
+    allowed to exist: the guard is a pure function of (t, boxes, sig), so
+    running it after the fact over buffered frames with real timestamps
+    gives the same verdict a live pass gave — and, unlike a live pass, the
+    server can reproduce it from the stored bundle.
+    """
+    import cv2                                              # noqa: F401
+    guard = guard or ContinuityGuard(fw, fh)
+    t0 = None if times is None else float(times[0])
+    for idx, frame in frames_iter:
+        if idx % stride:
+            continue
+        t = (idx / fps) if times is None else float(times[idx]) - t0
+        boxes = detect_cubes(frame, conf_floor=PRESENCE_CONF)
+        deduped = dedup_boxes(boxes)
+        sig = (box_signature(frame, max(deduped, key=lambda b: b[4]))
+               if deduped else None)
+        guard.update(t, boxes, sig)
+    return guard
+
+
 def _analyze(frames_iter, fw, fh, fps, stride, display=False):
     import cv2
     guard = ContinuityGuard(fw, fh)

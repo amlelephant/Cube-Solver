@@ -38,7 +38,14 @@ from model import build_joint_from_ckpt
 from onset_timing import frame_time_axis
 from reconstruct import WCA12
 
-SKIP_SUFFIX = "_scramble"
+#: Session name suffixes that are NOT solves and must never be scored as
+#: one. `_scan` is verify_solve.py phase 3 - the post-timer verification
+#: window, which is deliberately move-free; counted as a solve it would
+#: read as a legitimate attempt with ~0 moves and drag every aggregate
+#: here down. Suffix classification is load-bearing, so it lives in one
+#: tuple per file rather than in an inline endswith().
+SKIP_SUFFIXES = ("_scramble", "_scan")
+SKIP_SUFFIX = SKIP_SUFFIXES[0]   # kept: existing single-suffix callers
 
 #: How each metric is rendered. Percent-style fractions read far better as
 #: percentages, and seconds want more precision than turns per second.
@@ -64,6 +71,15 @@ def fmt(unit: str, value):
         return str(value)
 
 
+#: What the registry's accuracy figures were measured on. Stated here rather
+#: than typed into the footnote so the two cannot drift apart the next time
+#: metric_robustness.py is re-run on a bigger corpus — which is exactly what
+#: happened between 2026-08-06 (6 solves) and 2026-08-10 (14).
+HOLDOUT_DATE = "2026-08-10"
+HOLDOUT_DAY, HOLDOUT_EVE = 9, 5
+HOLDOUT_N = HOLDOUT_DAY + HOLDOUT_EVE
+
+
 def print_inventory() -> None:
     rows = registry_table()
     print(f"\n{'=' * 90}")
@@ -83,11 +99,14 @@ def print_inventory() -> None:
     n_eve = sum(r["evening"] != "suppressed" for r in rows)
     print(f"\n  {len(rows)} metrics shipped: {n_day} usable in daytime, "
           f"{n_eve} in evening.")
-    print("  Both columns are the worse of two seeds vs BLE truth on 6 "
-          "held-out solves:")
+    print(f"  Both columns are the worse of two seeds vs BLE truth on "
+          f"{HOLDOUT_N} held-out solves")
+    print(f"  ({HOLDOUT_DAY} daytime / {HOLDOUT_EVE} evening, "
+          f"re-measured {HOLDOUT_DATE}):")
     print("  'med' is the median session, 'worst' the worst — read 'worst' "
-          "for what a\n  user meets on a bad solve. n=3 per regime, so "
-          "treat these as indicative.")
+          "for what a\n  user meets on a bad solve. The evening column "
+          f"rests on n={HOLDOUT_EVE}, so its\n  medians are still weak and "
+          "its worst column is the honest one.")
 
 
 def analyse(d: Path, model, device, tag: str, beam: int):
@@ -142,9 +161,22 @@ def print_solve(rep: dict, truth: dict, meta: dict) -> None:
     for key, m in rep["metrics"].items():
         tv = truth["metrics"].get(key, {}).get("value")
         dv = m["value"]
-        if isinstance(dv, dict):
-            err = ""
-        elif tv in (None, 0):
+        if m.get("series"):
+            # A curve has no single value to print here, and forcing one
+            # would be inventing a scalar the registry deliberately does not
+            # have. Its agreement with truth is measured properly by
+            # metric_robustness.py, on a shared time grid; this line just
+            # says the series is present and how it starts and ends.
+            pts = dv or []
+            span = (f"{pts[0]['tps']:.2f} -> {pts[-1]['tps']:.2f} TPS"
+                    if pts else "--")
+            tpts = tv or []
+            tspan = (f"{tpts[0]['tps']:.2f} -> {tpts[-1]['tps']:.2f} TPS"
+                     if tpts else "--")
+            print(f"    {MARK[m['confidence']]}{m['label']:<25} "
+                  f"{span:>22} {tspan:>22}   {len(pts):>4} pts")
+            continue
+        if isinstance(dv, dict) or tv in (None, 0):
             err = ""
         else:
             err = f"{(dv - tv) / abs(tv) * 100:+6.1f}%"
